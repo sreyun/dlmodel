@@ -124,6 +124,22 @@ def test_create_download_rejects_traversal(client):
 
 
 @pytest.mark.asyncio
+async def test_empty_sqlite_int_does_not_break_settings(tmp_path, monkeypatch):
+    from app.db import init_db, set_setting
+    from app.routes.settings import effective_settings
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv("DOWNLOAD_CONCURRENCY", "2")
+    await init_db(str(tmp_path / "app.db"))
+    await set_setting("download_concurrency", "")
+    await set_setting("aria2_connections", "not-a-number")
+    merged = await effective_settings()
+    assert merged["download_concurrency"] == 2
+    assert isinstance(merged["aria2_connections"], int)
+
+
+@pytest.mark.asyncio
 async def test_empty_sqlite_token_does_not_override_env(tmp_path, monkeypatch):
     import os
 

@@ -41,18 +41,27 @@ class SettingsUpdate(BaseModel):
     vllm_base_url: str | None = None
 
 
-def _coerce(key: str, raw: str):
-    if key in _INT_KEYS:
-        return int(raw)
-    return raw
-
-
 def _usable_override(key: str, raw: str | None) -> bool:
     if raw is None:
         return False
     if key in _TOKEN_KEYS and optional_secret(raw) is None:
         return False
+    if key in _INT_KEYS:
+        try:
+            int(str(raw).strip())
+        except (TypeError, ValueError):
+            return False
+        return True
+    if isinstance(raw, str) and not raw.strip() and key not in _TOKEN_KEYS:
+        # Empty non-token overrides are treated as unset.
+        return False
     return True
+
+
+def _coerce(key: str, raw: str):
+    if key in _INT_KEYS:
+        return int(str(raw).strip())
+    return raw
 
 
 async def effective_settings() -> dict:
