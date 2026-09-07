@@ -1,6 +1,9 @@
 # Local development overlay — build from source, bind to localhost only.
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# ports use !override so 127.0.0.1 replaces the production 0.0.0.0 binding
+# (Compose merges port lists by uniqueness; different host IPs would otherwise both publish).
 
 services:
   web:
@@ -9,7 +12,7 @@ services:
       dockerfile: backend/Dockerfile
     image: dlmodel:dev
     pull_policy: build
-    ports:
+    ports: !override
       - "127.0.0.1:${WEB_PORT:-8080}:8080"
     environment:
       # Convenience for short local ADMIN_TOKEN values.
@@ -20,9 +23,9 @@ services:
     restart: unless-stopped
 
   ollama:
-    ports:
+    ports: !override
       - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
 
   vllm:
-    ports:
+    ports: !override
       - "127.0.0.1:${VLLM_PORT:-8000}:8000"

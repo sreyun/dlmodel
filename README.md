@@ -4,7 +4,8 @@
 
 | | |
 |--|--|
-| 开发入口 | [http://127.0.0.1:8080](http://127.0.0.1:8080)（compose 默认只绑本机） |
+| 生产部署 | `docker compose up -d`（默认拉 SWR `:latest`，Web 监听 `0.0.0.0:8080`） |
+| 本地开发 | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`（仅本机 `127.0.0.1:8080`） |
 | 生产镜像 | `swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest` |
 | 鉴权 | `.env` 中的 `ADMIN_TOKEN`（Bearer） |
 
@@ -44,7 +45,7 @@ docker compose up -d
 默认镜像为 SWR 的 `:latest`。需要固定版本时在 `.env` 写入：
 
 ```bash
-DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.2
+DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.3
 ```
 
 `pull_policy: always` 会在每次 `up` 时拉取镜像。Web 默认监听 `0.0.0.0:8080`（可用 `WEB_BIND` / `WEB_PORT` 调整）。
@@ -56,9 +57,9 @@ DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.2
 请先在 [SWR 控制台](https://console.huaweicloud.com/swr)（**华东-上海一 / cn-east-3**）创建组织，以便首次推送创建 `dlmodel` 仓库。
 
 ```bash
-git tag -a v0.3.2 -m "v0.3.2"
-git push origin v0.3.2
-# → 自动构建并推送 :v0.3.2 与 :latest
+git tag -a v0.3.3 -m "v0.3.3"
+git push origin v0.3.3
+# → 自动构建并推送 :v0.3.3 与 :latest
 ```
 
 手动重跑：Actions → **Build and push Huawei SWR** → Run workflow。

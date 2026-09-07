@@ -38,7 +38,8 @@ services:
     environment:
       <<: *web-env
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       - ${HOST_MODEL_ROOT:-./data/models}:/models
       - ${HOST_DATA_DIR:-./data/app}:/data
