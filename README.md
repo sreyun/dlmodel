@@ -1,6 +1,10 @@
 # dlmodel
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 面向国内网络的模型下载与管理工具：Web UI + FastAPI + aria2，支持从 **ModelScope / Hugging Face（镜像）/ Ollama** 拉取权重，落盘到 **vLLM 布局** 或 **Ollama**；任务与设置持久化到 SQLite，可选钉钉 / 飞书 / 企业微信推送。
+
+本仓库以 **MIT** 协议开源，欢迎使用、修改与分发。
 
 | | |
 |--|--|
@@ -170,3 +174,7 @@ cd backend && python -m pytest tests/ -q
 |------|------|
 | `docker-compose.yml` | **默认生产**：`docker compose up -d`（拉 SWR 镜像、健康检查、日志轮转） |
 | `docker-compose.dev.yml` | 本地开发 overlay：源码构建、仅绑本机、宽松 Token |
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 发布。
