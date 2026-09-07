@@ -19,3 +19,13 @@ def test_scan_and_delete(tmp_path: Path):
 def test_delete_rejects_traversal(tmp_path: Path):
     with pytest.raises(ValueError):
         delete_model(str(tmp_path), "../etc/passwd")
+
+
+def test_delete_rejects_incomplete_id(tmp_path: Path):
+    with pytest.raises(ValueError):
+        delete_model(str(tmp_path), "hf/org")
+
+
+def test_delete_missing_raises(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        delete_model(str(tmp_path), "hf/Org/Missing")

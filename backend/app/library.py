@@ -11,7 +11,7 @@ def _resolve_model_path(model_root: str, model_id: str) -> Path:
         raise ValueError("path traversal rejected")
 
     parts = model_id.strip("/\\").split("/")
-    if len(parts) < 2 or parts[0] != "hf":
+    if len(parts) != 3 or parts[0] != "hf":
         raise ValueError("invalid model id")
 
     root = Path(model_root).resolve()
@@ -48,5 +48,6 @@ def scan_hf_library(model_root: str) -> list[dict]:
 
 def delete_model(model_root: str, model_id: str) -> None:
     target = _resolve_model_path(model_root, model_id)
-    if target.exists():
-        shutil.rmtree(target)
+    if not target.exists():
+        raise FileNotFoundError(model_id)
+    shutil.rmtree(target)

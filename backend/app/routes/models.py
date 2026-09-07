@@ -18,4 +18,6 @@ async def remove_model(model_id: str, _: None = Depends(require_admin)) -> dict:
         delete_model(get_settings().model_root, model_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Model not found") from exc
     return {"ok": True}
