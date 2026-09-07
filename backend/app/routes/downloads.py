@@ -72,7 +72,12 @@ async def get_download(task_id: str, _: None = Depends(require_admin)) -> TaskOu
 async def cancel_download(
     task_id: str, request: Request, _: None = Depends(require_admin)
 ) -> TaskOut:
-    await _get_existing(task_id)
+    row = await _get_existing(task_id)
+    if row["status"] in _TERMINAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel task in status {row['status']}",
+        )
     await request.app.state.queue.cancel(task_id)
     return _as_task(await _get_existing(task_id))
 
@@ -81,7 +86,12 @@ async def cancel_download(
 async def retry_download(
     task_id: str, request: Request, _: None = Depends(require_admin)
 ) -> TaskOut:
-    await _get_existing(task_id)
+    row = await _get_existing(task_id)
+    if row["status"] not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot retry task in status {row['status']}",
+        )
     await request.app.state.queue.retry(task_id)
     return _as_task(await _get_existing(task_id))
 

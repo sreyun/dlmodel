@@ -1,6 +1,18 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import create_app
+
+
+def _wait_status(client, tid, headers, *statuses, attempts=50):
+    row = None
+    for _ in range(attempts):
+        row = client.get(f"/api/downloads/{tid}", headers=headers).json()
+        if row.get("status") in statuses:
+            return row
+        time.sleep(0.05)
+    return row
 
 
 @pytest.fixture
@@ -72,3 +84,34 @@ def test_events_accepts_token_query(client):
     assert ev.headers["content-type"].startswith("text/event-stream")
     assert "data: " in ev.text
     assert "status" in ev.text
+
+
+def test_retry_rejects_completed(client):
+    headers = {"Authorization": "Bearer secret"}
+    r = client.post(
+        "/api/downloads",
+        headers=headers,
+        json={"name": "a/b", "source": "huggingface", "target": "vllm"},
+    )
+    tid = r.json()["id"]
+    row = _wait_status(client, tid, headers, "completed", "failed")
+    assert row["status"] == "completed"
+    retry = client.post(f"/api/downloads/{tid}/retry", headers=headers)
+    assert retry.status_code == 400
+    detail = retry.json()["detail"]
+    assert "retry" in detail.lower() or "completed" in detail.lower()
+
+
+def test_cancel_rejects_completed(client):
+    headers = {"Authorization": "Bearer secret"}
+    r = client.post(
+        "/api/downloads",
+        headers=headers,
+        json={"name": "a/b", "source": "huggingface", "target": "vllm"},
+    )
+    tid = r.json()["id"]
+    row = _wait_status(client, tid, headers, "completed", "failed")
+    assert row["status"] == "completed"
+    cancelled = client.post(f"/api/downloads/{tid}/cancel", headers=headers)
+    assert cancelled.status_code == 400
+    assert cancelled.json()["detail"]

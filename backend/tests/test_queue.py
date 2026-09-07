@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.db import get_task, init_db
+from app.db import get_task, init_db, set_setting
 from app.models_schema import DownloadCreate
 from app.paths import hf_model_dir
 from app.queue import DownloadQueue
@@ -148,6 +148,37 @@ async def test_unknown_model_fails(tmp_path, monkeypatch):
     await q.stop()
     assert row["status"] == "failed"
     assert row["message"].startswith("Model not found on attempted sources:")
+
+
+@pytest.mark.asyncio
+async def test_run_download_uses_effective_settings(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv("HF_ENDPOINT", "https://env-default.example")
+    await set_setting("hf_endpoint", "https://sqlite-override.example")
+    await set_setting("hf_token", "sqlite-token")
+    captured = {}
+
+    async def fake_hf_exists(name, endpoint, token):
+        captured["endpoint"] = endpoint
+        captured["token"] = token
+        return False
+
+    async def missing(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr("app.queue.hf_repo_exists", fake_hf_exists)
+    monkeypatch.setattr("app.queue.ms_repo_exists", missing)
+
+    q = DownloadQueue(concurrency=1)
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    await _wait_status(tid, "failed", "completed")
+    await q.stop()
+    assert captured["endpoint"] == "https://sqlite-override.example"
+    assert captured["token"] == "sqlite-token"
 
 
 @pytest.mark.asyncio

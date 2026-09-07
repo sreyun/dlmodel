@@ -46,7 +46,7 @@ def _coerce(key: str, raw: str):
     return raw
 
 
-async def merged_settings() -> dict:
+async def effective_settings() -> dict:
     base = get_settings()
     out = {key: getattr(base, key) for key in _MERGE_KEYS}
     for key in _MERGE_KEYS:
@@ -65,7 +65,7 @@ async def apply_sqlite_overrides() -> None:
 
 @router.get("/api/settings")
 async def get_settings_route(_: None = Depends(require_admin)) -> dict:
-    return await merged_settings()
+    return await effective_settings()
 
 
 @router.put("/api/settings")
@@ -78,4 +78,4 @@ async def put_settings_route(
             continue
         stored = "" if value is None else str(value)
         await set_setting(key, stored)
-    return await merged_settings()
+    return await effective_settings()

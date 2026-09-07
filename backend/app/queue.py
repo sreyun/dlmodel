@@ -13,6 +13,7 @@ from app.downloaders import (
 )
 from app.models_schema import DownloadCreate
 from app.paths import hf_model_dir, ollama_root
+from app.routes.settings import effective_settings
 from app.source_resolve import resolve_source
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
@@ -232,14 +233,14 @@ class DownloadQueue:
         await self._finish_if_active(task_id, status="completed", speed_bps=0)
 
     async def _run_download(self, task, on_progress, on_log, cancelled) -> None:
-        settings = get_settings()
+        settings = await effective_settings()
 
         async def ms_exists(name: str) -> bool:
-            return await ms_repo_exists(name, settings.modelscope_api_token)
+            return await ms_repo_exists(name, settings["modelscope_api_token"])
 
         async def hf_exists(name: str) -> bool:
             return await hf_repo_exists(
-                name, settings.hf_endpoint, settings.hf_token
+                name, settings["hf_endpoint"], settings["hf_token"]
             )
 
         sources = await resolve_source(
@@ -266,11 +267,11 @@ class DownloadQueue:
                     await download_hf(
                         task["name"],
                         dest,
-                        endpoint=settings.hf_endpoint,
-                        token=settings.hf_token,
+                        endpoint=settings["hf_endpoint"],
+                        token=settings["hf_token"],
                         revision=task.get("revision"),
                         aria2=aria2,
-                        connections=settings.aria2_connections,
+                        connections=settings["aria2_connections"],
                         on_progress=on_progress,
                         on_log=on_log,
                     )
@@ -284,7 +285,7 @@ class DownloadQueue:
                     await download_modelscope(
                         task["name"],
                         dest,
-                        token=settings.modelscope_api_token,
+                        token=settings["modelscope_api_token"],
                         revision=task.get("revision"),
                         on_progress=on_progress,
                         on_log=on_log,
@@ -294,7 +295,7 @@ class DownloadQueue:
                     found_any = True
                     await download_ollama(
                         task["name"],
-                        settings.ollama_base_url,
+                        settings["ollama_base_url"],
                         on_progress=on_progress,
                         on_log=on_log,
                     )
