@@ -10,6 +10,7 @@ async def http_download(
     url: str,
     dest: Path,
     on_progress: ProgressCallback,
+    headers: dict[str, str] | None = None,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     downloaded = 0
@@ -18,7 +19,7 @@ async def http_download(
     total: int | None = None
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        async with client.stream("GET", url) as resp:
+        async with client.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
             if content_length := resp.headers.get("content-length"):
                 total = int(content_length)

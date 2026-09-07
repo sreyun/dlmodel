@@ -1,8 +1,8 @@
 import asyncio
-import os
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_url
+from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from app.aria2_client import Aria2Client
 from app.downloaders.base import LogCallback, ProgressCallback
@@ -14,8 +14,12 @@ async def hf_repo_exists(name: str, endpoint: str, token: str | None) -> bool:
     try:
         await asyncio.to_thread(api.repo_info, repo_id=name, repo_type="model")
         return True
-    except Exception:
+    except RepositoryNotFoundError:
         return False
+    except HfHubHTTPError as exc:
+        if exc.response.status_code == 404:
+            return False
+        raise
 
 
 def _hf_download_url(
@@ -67,6 +71,7 @@ async def _download_hf_file(
     revision: str | None,
     dest: Path,
     endpoint: str,
+    token: str | None,
     aria2: Aria2Client | None,
     connections: int,
     on_progress: ProgressCallback,
@@ -76,7 +81,14 @@ async def _download_hf_file(
     file_dest = dest / filename
     await on_log(f"Downloading {filename}")
 
-    if aria2 and await aria2.is_available():
+    auth_headers = {"Authorization": f"Bearer {token}"} if token else None
+
+    if token:
+        await on_log("HF token set; using authenticated HTTP download")
+        await http_download(
+            url, file_dest, on_progress=on_progress, headers=auth_headers
+        )
+    elif aria2 and await aria2.is_available():
         try:
             await _download_with_aria2(
                 url, file_dest, aria2, connections, on_progress
@@ -84,10 +96,12 @@ async def _download_hf_file(
             return
         except Exception as exc:
             await on_log(
-                f"aria2 failed for {filename}: {exc}; finishing via HTTP fallback"
+                f"aria2 failed for {filename}: {exc}; falling back to HTTP"
             )
-
-    await http_download(url, file_dest, on_progress=on_progress)
+            await http_download(url, file_dest, on_progress=on_progress)
+    else:
+        await on_log("aria2 unavailable; using SDK HTTP fallback")
+        await http_download(url, file_dest, on_progress=on_progress)
 
 
 async def download_hf(
@@ -102,7 +116,6 @@ async def download_hf(
     on_progress: ProgressCallback,
     on_log: LogCallback,
 ) -> None:
-    os.environ["HF_ENDPOINT"] = endpoint
     api = HfApi(endpoint=endpoint, token=token)
     files = await asyncio.to_thread(
         api.list_repo_files, repo_id=name, revision=revision, repo_type="model"
@@ -116,6 +129,7 @@ async def download_hf(
             revision,
             Path(dest),
             endpoint,
+            token,
             aria2,
             connections,
             on_progress,

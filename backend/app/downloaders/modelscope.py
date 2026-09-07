@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import requests
+
 from modelscope import snapshot_download
 from modelscope.hub.api import HubApi
 
@@ -11,10 +13,12 @@ async def ms_repo_exists(name: str, token: str | None) -> bool:
     api = HubApi(token=token)
     try:
         return await asyncio.to_thread(
-            api.repo_exists, repo_id=name, repo_type="model"
+            api.repo_exists, repo_id=name, repo_type="model", re_raise=True
         )
-    except Exception:
-        return False
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return False
+        raise
 
 
 async def download_modelscope(
