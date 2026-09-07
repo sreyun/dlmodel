@@ -42,4 +42,4 @@ async def download_modelscope(
         )
 
     result = await asyncio.to_thread(_download)
-    await on_log(f"ModelScope download complete: {result}")
+    await on_log(f"ModelScope 下载完成：{result}")

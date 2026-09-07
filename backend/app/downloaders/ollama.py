@@ -12,7 +12,7 @@ async def download_ollama(
     on_log: LogCallback,
 ) -> None:
     url = f"{base_url}/api/pull"
-    await on_log(f"Pulling Ollama model {name} from {url}")
+    await on_log(f"正在从 {url} 拉取 Ollama 模型 {name}")
 
     async with httpx.AsyncClient() as client:
         async with client.stream(

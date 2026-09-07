@@ -147,7 +147,7 @@ async def test_unknown_model_fails(tmp_path, monkeypatch):
     row = await _wait_status(tid, "failed", "completed")
     await q.stop()
     assert row["status"] == "failed"
-    assert row["message"].startswith("Model not found on attempted sources:")
+    assert row["message"].startswith("在尝试的源中未找到模型：")
 
 
 @pytest.mark.asyncio
@@ -232,8 +232,8 @@ async def test_stop_marks_queued_and_running(tmp_path, monkeypatch):
     queued = await get_task(queued_id)
     assert running["status"] in ("cancelled", "failed")
     assert queued["status"] in ("cancelled", "failed")
-    assert "queue stopped" in running["message"]
-    assert "queue stopped" in queued["message"]
+    assert "队列已停止" in running["message"]
+    assert "队列已停止" in queued["message"]
 
 
 @pytest.mark.asyncio

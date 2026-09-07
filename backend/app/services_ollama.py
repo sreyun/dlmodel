@@ -9,7 +9,7 @@ async def ollama_health(base_url: str) -> dict:
         async with httpx.AsyncClient() as client:
             resp = await client.get(url, timeout=10.0)
             if resp.status_code == 200:
-                return {"ok": True, "detail": "connected"}
+                return {"ok": True, "detail": "已连接"}
             return {"ok": False, "detail": f"HTTP {resp.status_code}"}
     except httpx.HTTPError as exc:
         return {"ok": False, "detail": str(exc)}

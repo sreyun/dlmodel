@@ -22,9 +22,9 @@ async def _require_events_auth(
         await require_admin(authorization)
         return
     if not token:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+        raise HTTPException(status_code=401, detail="缺少 Bearer 令牌")
     if token != get_settings().admin_token:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="令牌无效")
 
 
 def _as_task(row: dict) -> TaskOut:
@@ -44,7 +44,7 @@ def _event_payload(row: dict) -> dict:
 async def _get_existing(task_id: str) -> dict:
     row = await get_task(task_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Download not found")
+        raise HTTPException(status_code=404, detail="下载任务不存在")
     return row
 
 
@@ -79,7 +79,7 @@ async def cancel_download(
     if row["status"] in _TERMINAL:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel task in status {row['status']}",
+            detail=f"无法取消处于「{row['status']}」状态的任务",
         )
     await request.app.state.queue.cancel(task_id)
     return _as_task(await _get_existing(task_id))
@@ -93,7 +93,7 @@ async def retry_download(
     if row["status"] not in ("failed", "cancelled"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot retry task in status {row['status']}",
+            detail=f"无法重试处于「{row['status']}」状态的任务",
         )
     await request.app.state.queue.retry(task_id)
     return _as_task(await _get_existing(task_id))

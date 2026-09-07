@@ -28,7 +28,7 @@ def test_hf_model_dir(tmp_path: Path):
     ],
 )
 def test_parse_model_name_rejects_traversal(name: str):
-    with pytest.raises(ValueError, match="path traversal rejected"):
+    with pytest.raises(ValueError, match="拒绝路径穿越"):
         parse_model_name(name)
 
 
@@ -41,5 +41,5 @@ def test_parse_model_name_rejects_traversal(name: str):
     ],
 )
 def test_hf_model_dir_rejects_traversal(tmp_path: Path, name: str):
-    with pytest.raises(ValueError, match="path traversal rejected"):
+    with pytest.raises(ValueError, match="拒绝路径穿越"):
         hf_model_dir(str(tmp_path), name)

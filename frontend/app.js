@@ -2,6 +2,14 @@ const TOKEN_KEY = "dlmodel_token";
 const ROUTES = ["download", "tasks", "library", "services", "settings"];
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
+const STATUS_LABEL = {
+  queued: "排队中",
+  running: "下载中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
 let pollTimer = null;
 let tasksInFlight = false;
 
@@ -31,7 +39,7 @@ function errorMessage(data, fallback) {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
   if (detail != null) return JSON.stringify(detail);
-  return fallback || "Request failed";
+  return fallback || "请求失败";
 }
 
 function esc(value) {
@@ -76,11 +84,28 @@ function progressLabel(task) {
   return `${pct.toFixed(1)}% (${fmtBytes(task.progress_bytes)} / ${fmtBytes(task.total_bytes)})`;
 }
 
+function statusLabel(status) {
+  return STATUS_LABEL[status] || status;
+}
+
+function sourceLabel(source) {
+  return ({
+    auto: "自动",
+    modelscope: "ModelScope 魔搭",
+    huggingface: "Hugging Face",
+    ollama: "Ollama",
+  })[source] || source;
+}
+
+function targetLabel(target) {
+  return ({ vllm: "vLLM", ollama: "Ollama" })[target] || target;
+}
+
 function destHint(name, source, target) {
   const model = (name || "").trim();
-  if (!model) return "Enter a model name to preview the destination.";
-  if (target === "ollama" || source === "ollama") return `Ollama library: ${model}`;
-  return `hf/${model}`;
+  if (!model) return "输入模型名称后可预览保存路径。";
+  if (target === "ollama" || source === "ollama") return `Ollama 模型库：${model}`;
+  return `保存路径预览：hf/${model}`;
 }
 
 function currentPage() {
@@ -112,12 +137,12 @@ function showLogin(message) {
   setNavVisible(false);
   $("app").innerHTML = `
     <div class="panel" style="max-width:420px;margin:48px auto;">
-      <h1>Sign in</h1>
-      <p class="muted">Enter the admin token. It is stored in this browser as <span class="mono">dlmodel_token</span>.</p>
+      <h1>登录</h1>
+      <p class="muted">请输入管理员令牌（ADMIN_TOKEN）。令牌会保存在本浏览器的 <span class="mono">dlmodel_token</span> 中。</p>
       ${flash("error", message)}
       <form id="login-form">
-        <label><span>Admin token</span><input id="token" type="password" autocomplete="current-password" required></label>
-        <div class="actions"><button class="primary" type="submit">Continue</button></div>
+        <label><span>管理员令牌</span><input id="token" type="password" autocomplete="current-password" required></label>
+        <div class="actions"><button class="primary" type="submit">进入系统</button></div>
       </form>
     </div>`;
   $("login-form").addEventListener("submit", async (event) => {
@@ -128,7 +153,7 @@ function showLogin(message) {
       await showApp();
     } catch (err) {
       localStorage.removeItem(TOKEN_KEY);
-      showLogin(err.message === "unauthorized" ? "Invalid token" : err.message);
+      showLogin(err.message === "unauthorized" ? "令牌无效" : err.message);
     }
   });
 }
@@ -150,7 +175,7 @@ async function guarded(fn) {
     await fn();
   } catch (err) {
     if (err.message === "unauthorized") {
-      showLogin("Session expired. Sign in again.");
+      showLogin("登录已过期，请重新登录。");
       return;
     }
     $("app").insertAdjacentHTML("afterbegin", flash("error", err.message));
@@ -159,27 +184,27 @@ async function guarded(fn) {
 
 function renderDownload() {
   $("app").innerHTML = `
-    <h1>Download</h1>
+    <h1>下载模型</h1>
     <div class="panel">
       <form id="dl-form">
-        <label><span>Model name</span><input id="name" required placeholder="Qwen/Qwen2.5-7B-Instruct"></label>
-        <label><span>Source</span>
+        <label><span>模型名称</span><input id="name" required placeholder="Qwen/Qwen2.5-7B-Instruct 或 llama3.2"></label>
+        <label><span>下载源</span>
           <select id="source">
-            <option value="auto">auto</option>
-            <option value="modelscope">modelscope</option>
-            <option value="huggingface">huggingface</option>
-            <option value="ollama">ollama</option>
+            <option value="auto">自动（优先魔搭，回落 HF）</option>
+            <option value="modelscope">ModelScope 魔搭</option>
+            <option value="huggingface">Hugging Face</option>
+            <option value="ollama">Ollama</option>
           </select>
         </label>
-        <label><span>Target</span>
+        <label><span>目标用途</span>
           <select id="target">
-            <option value="vllm">vllm</option>
-            <option value="ollama">ollama</option>
+            <option value="vllm">vLLM（HF 目录布局）</option>
+            <option value="ollama">Ollama</option>
           </select>
         </label>
-        <label><span>Revision (optional)</span><input id="revision" placeholder="main"></label>
+        <label><span>版本 / Revision（可选）</span><input id="revision" placeholder="main"></label>
         <p class="hint" id="dest-hint">${esc(destHint("", "auto", "vllm"))}</p>
-        <div class="actions"><button class="primary" type="submit">Start download</button></div>
+        <div class="actions"><button class="primary" type="submit">开始下载</button></div>
       </form>
     </div>`;
 
@@ -202,7 +227,7 @@ function renderDownload() {
     await guarded(async () => {
       const created = await apiJson("/api/downloads", { method: "POST", body: JSON.stringify(body) });
       location.hash = "#/tasks";
-      $("app").insertAdjacentHTML("afterbegin", flash("ok", `Queued ${created.id}`));
+      $("app").insertAdjacentHTML("afterbegin", flash("ok", `已加入队列：${created.id}`));
     });
   });
 }
@@ -212,13 +237,13 @@ function taskRow(task) {
   const canRetry = task.status === "failed" || task.status === "cancelled";
   return `<tr>
     <td class="mono" title="${esc(task.id)}">${esc(String(task.id).slice(0, 8))}</td>
-    <td>${esc(task.name)}<div class="muted">${esc(task.source)} → ${esc(task.target)}</div></td>
-    <td class="status ${esc(task.status)}">${esc(task.status)}</td>
+    <td>${esc(task.name)}<div class="muted">${esc(sourceLabel(task.source))} → ${esc(targetLabel(task.target))}</div></td>
+    <td class="status ${esc(task.status)}">${esc(statusLabel(task.status))}</td>
     <td>${esc(progressLabel(task))}<div class="muted">${esc(fmtSpeed(task.speed_bps))}</div></td>
     <td>${esc(task.message || "")}</td>
     <td>
-      <button data-act="cancel" data-id="${esc(task.id)}" ${canCancel ? "" : "disabled"}>Cancel</button>
-      <button data-act="retry" data-id="${esc(task.id)}" ${canRetry ? "" : "disabled"}>Retry</button>
+      <button data-act="cancel" data-id="${esc(task.id)}" ${canCancel ? "" : "disabled"}>取消</button>
+      <button data-act="retry" data-id="${esc(task.id)}" ${canRetry ? "" : "disabled"}>重试</button>
     </td>
   </tr>`;
 }
@@ -232,10 +257,10 @@ async function refreshTasks() {
     if (!body) return;
     body.innerHTML = tasks.length
       ? tasks.map(taskRow).join("")
-      : `<tr><td colspan="6" class="empty">No download tasks yet.</td></tr>`;
+      : `<tr><td colspan="6" class="empty">暂无下载任务。</td></tr>`;
   } catch (err) {
     if (err.message === "unauthorized") {
-      showLogin("Session expired. Sign in again.");
+      showLogin("登录已过期，请重新登录。");
       return;
     }
     const box = $("task-error");
@@ -247,22 +272,22 @@ async function refreshTasks() {
 
 function renderTasks() {
   $("app").innerHTML = `
-    <h1>Tasks</h1>
+    <h1>下载任务</h1>
     <div id="task-error"></div>
     <div class="panel">
       <table>
         <thead>
           <tr>
             <th>ID</th>
-            <th>Model</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Message</th>
-            <th></th>
+            <th>模型</th>
+            <th>状态</th>
+            <th>进度</th>
+            <th>消息</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody id="task-body">
-          <tr><td colspan="6" class="empty">Loading…</td></tr>
+          <tr><td colspan="6" class="empty">加载中…</td></tr>
         </tbody>
       </table>
     </div>`;
@@ -285,15 +310,15 @@ function renderTasks() {
 
 function renderLibrary() {
   $("app").innerHTML = `
-    <h1>Library</h1>
+    <h1>模型库</h1>
     <div id="lib-msg"></div>
     <div class="panel">
       <table>
         <thead>
-          <tr><th>Name</th><th>Path</th><th>Size</th><th>Target</th><th></th></tr>
+          <tr><th>名称</th><th>路径</th><th>大小</th><th>用途</th><th>操作</th></tr>
         </thead>
         <tbody id="lib-body">
-          <tr><td colspan="5" class="empty">Loading…</td></tr>
+          <tr><td colspan="5" class="empty">加载中…</td></tr>
         </tbody>
       </table>
     </div>`;
@@ -306,10 +331,10 @@ function renderLibrary() {
             <td>${esc(m.name)}<div class="muted mono">${esc(m.id)}</div></td>
             <td class="mono">${esc(m.path)}</td>
             <td>${esc(fmtBytes(m.size_bytes))}</td>
-            <td>${esc(m.target)}</td>
-            <td><button class="danger" data-del="${esc(m.id)}">Delete</button></td>
+            <td>${esc(targetLabel(m.target))}</td>
+            <td><button class="danger" data-del="${esc(m.id)}">删除</button></td>
           </tr>`).join("")
-        : `<tr><td colspan="5" class="empty">No models on disk.</td></tr>`;
+        : `<tr><td colspan="5" class="empty">磁盘上还没有已下载模型。</td></tr>`;
     });
   };
 
@@ -317,10 +342,10 @@ function renderLibrary() {
     const btn = event.target.closest("button[data-del]");
     if (!btn) return;
     const id = btn.getAttribute("data-del");
-    if (!confirm(`Delete ${id}?`)) return;
+    if (!confirm(`确认删除 ${id}？此操作不可恢复。`)) return;
     await guarded(async () => {
       await apiJson(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
-      $("lib-msg").innerHTML = flash("ok", `Deleted ${id}`);
+      $("lib-msg").innerHTML = flash("ok", `已删除 ${id}`);
       await load();
     });
   });
@@ -329,40 +354,40 @@ function renderLibrary() {
 }
 
 function healthBadge(health) {
-  if (!health) return `<span class="muted">unknown</span>`;
+  if (!health) return `<span class="muted">未知</span>`;
   return health.ok
-    ? `<span class="status completed">connected</span> <span class="muted">${esc(health.detail || "")}</span>`
-    : `<span class="status failed">down</span> <span class="muted">${esc(health.detail || "")}</span>`;
+    ? `<span class="status completed">已连接</span> <span class="muted">${esc(health.detail || "")}</span>`
+    : `<span class="status failed">不可达</span> <span class="muted">${esc(health.detail || "")}</span>`;
 }
 
 function renderServices() {
   $("app").innerHTML = `
-    <h1>Services</h1>
+    <h1>推理服务</h1>
     <div class="row">
       <div class="panel">
         <h2>Ollama</h2>
-        <p id="ollama-health" class="muted">Checking…</p>
+        <p id="ollama-health" class="muted">检查中…</p>
         <form id="ollama-pull" class="actions">
           <input id="ollama-name" placeholder="llama3.2" required style="max-width:240px">
-          <button class="primary" type="submit">Pull</button>
-          <button type="button" id="ollama-refresh">Refresh</button>
+          <button class="primary" type="submit">拉取</button>
+          <button type="button" id="ollama-refresh">刷新</button>
         </form>
         <div id="ollama-msg"></div>
         <table>
-          <thead><tr><th>Name</th><th>Size</th></tr></thead>
-          <tbody id="ollama-models"><tr><td colspan="2" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>名称</th><th>大小</th></tr></thead>
+          <tbody id="ollama-models"><tr><td colspan="2" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="panel">
         <h2>vLLM</h2>
-        <p id="vllm-health" class="muted">Checking…</p>
+        <p id="vllm-health" class="muted">检查中…</p>
         <form id="vllm-form">
-          <label><span>Model path</span><input id="vllm-model" required placeholder="/models/hf/Qwen/Qwen2.5-7B-Instruct"></label>
-          <label><span>Port</span><input id="vllm-port" type="number" value="8000" min="1"></label>
+          <label><span>模型路径</span><input id="vllm-model" required placeholder="/models/hf/Qwen/Qwen2.5-7B-Instruct"></label>
+          <label><span>端口</span><input id="vllm-port" type="number" value="8000" min="1"></label>
           <div class="actions">
-            <button class="primary" type="submit">Build command</button>
-            <button type="button" id="copy-cmd" disabled>Copy</button>
-            <button type="button" id="vllm-refresh">Refresh health</button>
+            <button class="primary" type="submit">生成启动命令</button>
+            <button type="button" id="copy-cmd" disabled>复制</button>
+            <button type="button" id="vllm-refresh">刷新状态</button>
           </div>
         </form>
         <p id="vllm-cmd" class="mono cmd hint"></p>
@@ -377,7 +402,7 @@ function renderServices() {
         const models = await apiJson("/api/services/ollama/models");
         $("ollama-models").innerHTML = models.length
           ? models.map((m) => `<tr><td>${esc(m.name || m.model || "")}</td><td>${esc(fmtBytes(m.size))}</td></tr>`).join("")
-          : `<tr><td colspan="2" class="empty">No Ollama models.</td></tr>`;
+          : `<tr><td colspan="2" class="empty">暂无 Ollama 模型。</td></tr>`;
       } catch (err) {
         $("ollama-models").innerHTML = `<tr><td colspan="2" class="empty">${esc(err.message)}</td></tr>`;
       }
@@ -395,10 +420,10 @@ function renderServices() {
   $("ollama-pull").addEventListener("submit", async (event) => {
     event.preventDefault();
     const name = $("ollama-name").value.trim();
-    $("ollama-msg").innerHTML = flash("", `Pulling ${name}…`);
+    $("ollama-msg").innerHTML = flash("", `正在拉取 ${name}…`);
     await guarded(async () => {
       await apiJson("/api/services/ollama/pull", { method: "POST", body: JSON.stringify({ name }) });
-      $("ollama-msg").innerHTML = flash("ok", `Pulled ${name}`);
+      $("ollama-msg").innerHTML = flash("ok", `已拉取 ${name}`);
       await loadOllama();
     });
   });
@@ -427,7 +452,7 @@ function renderServices() {
       document.execCommand("copy");
       box.remove();
     }
-    $("vllm-cmd").insertAdjacentHTML("beforebegin", flash("ok", "Copied launch command"));
+    $("vllm-cmd").insertAdjacentHTML("beforebegin", flash("ok", "启动命令已复制"));
   });
 
   loadOllama();
@@ -436,18 +461,18 @@ function renderServices() {
 
 function renderSettings() {
   $("app").innerHTML = `
-    <h1>Settings</h1>
+    <h1>设置</h1>
     <div id="set-msg"></div>
     <div class="panel">
       <form id="set-form">
-        <label><span>HF endpoint</span><input id="hf_endpoint"></label>
-        <label><span>HF token</span><input id="hf_token" type="password" autocomplete="off"></label>
-        <label><span>ModelScope API token</span><input id="modelscope_api_token" type="password" autocomplete="off"></label>
-        <label><span>Download concurrency</span><input id="download_concurrency" type="number" min="1"></label>
-        <label><span>aria2 connections</span><input id="aria2_connections" type="number" min="1"></label>
-        <label><span>Ollama base URL</span><input id="ollama_base_url"></label>
-        <label><span>vLLM base URL</span><input id="vllm_base_url"></label>
-        <div class="actions"><button class="primary" type="submit">Save</button></div>
+        <label><span>Hugging Face 镜像地址</span><input id="hf_endpoint"></label>
+        <label><span>HF Token（留空表示不修改）</span><input id="hf_token" type="password" autocomplete="off"></label>
+        <label><span>ModelScope Token（留空表示不修改）</span><input id="modelscope_api_token" type="password" autocomplete="off"></label>
+        <label><span>下载并发任务数</span><input id="download_concurrency" type="number" min="1"></label>
+        <label><span>aria2 单文件连接数</span><input id="aria2_connections" type="number" min="1"></label>
+        <label><span>Ollama 服务地址</span><input id="ollama_base_url"></label>
+        <label><span>vLLM 服务地址</span><input id="vllm_base_url"></label>
+        <div class="actions"><button class="primary" type="submit">保存设置</button></div>
       </form>
     </div>`;
 
@@ -483,7 +508,7 @@ function renderSettings() {
     if (msToken) body.modelscope_api_token = msToken;
     await guarded(async () => {
       await apiJson("/api/settings", { method: "PUT", body: JSON.stringify(body) });
-      $("set-msg").innerHTML = flash("ok", "Settings saved");
+      $("set-msg").innerHTML = flash("ok", "设置已保存");
     });
   });
 }

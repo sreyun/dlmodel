@@ -9,10 +9,10 @@ async def vllm_health(base_url: str) -> dict:
                 try:
                     resp = await client.get(f"{base}{path}", timeout=10.0)
                     if resp.status_code == 200:
-                        return {"ok": True, "detail": "connected"}
+                        return {"ok": True, "detail": "已连接"}
                 except httpx.HTTPError:
                     continue
-            return {"ok": False, "detail": "unreachable"}
+            return {"ok": False, "detail": "不可达"}
     except httpx.HTTPError as exc:
         return {"ok": False, "detail": str(exc)}
 

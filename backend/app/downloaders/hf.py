@@ -80,7 +80,7 @@ async def _download_hf_file(
 ) -> None:
     url = _hf_download_url(name, filename, revision, endpoint)
     file_dest = dest / filename
-    await on_log(f"Downloading {filename}")
+    await on_log(f"正在下载 {filename}")
 
     token = optional_secret(token)
     auth_headers = {"Authorization": f"Bearer {token}"} if token else None
@@ -98,11 +98,11 @@ async def _download_hf_file(
             return
         except Exception as exc:
             await on_log(
-                f"aria2 failed for {filename}: {exc}; falling back to HTTP"
+                f"aria2 下载 {filename} 失败：{exc}；回退到 HTTP"
             )
             await http_download(url, file_dest, on_progress=on_progress)
     else:
-        await on_log("aria2 unavailable; using SDK HTTP fallback")
+        await on_log("aria2 不可用；使用 SDK HTTP 回退下载")
         await http_download(url, file_dest, on_progress=on_progress)
 
 
@@ -139,4 +139,4 @@ async def download_hf(
             on_log,
         )
 
-    await on_log(f"HF download complete for {name}")
+    await on_log(f"HF 下载完成：{name}")

@@ -120,7 +120,7 @@ def test_create_download_rejects_traversal(client):
         json={"name": "foo/../../../tmp/x", "source": "huggingface", "target": "vllm"},
     )
     assert r.status_code == 400
-    assert "path traversal" in r.json()["detail"].lower()
+    assert "路径穿越" in r.json()["detail"] or "拒绝" in r.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -175,7 +175,7 @@ def test_retry_rejects_completed(client):
     retry = client.post(f"/api/downloads/{tid}/retry", headers=headers)
     assert retry.status_code == 400
     detail = retry.json()["detail"]
-    assert "retry" in detail.lower() or "completed" in detail.lower()
+    assert "重试" in detail or "completed" in detail
 
 
 def test_cancel_rejects_completed(client):

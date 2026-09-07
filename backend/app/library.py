@@ -8,16 +8,16 @@ def _dir_size_bytes(path: Path) -> int:
 
 def _resolve_model_path(model_root: str, model_id: str) -> Path:
     if ".." in Path(model_id).parts:
-        raise ValueError("path traversal rejected")
+        raise ValueError("拒绝路径穿越")
 
     parts = model_id.strip("/\\").split("/")
     if len(parts) != 3 or parts[0] != "hf":
-        raise ValueError("invalid model id")
+        raise ValueError("模型 ID 无效，需为 hf/组织/仓库")
 
     root = Path(model_root).resolve()
     target = (root / Path(*parts)).resolve()
     if not target.is_relative_to(root):
-        raise ValueError("path traversal rejected")
+        raise ValueError("拒绝路径穿越")
     return target
 
 

@@ -125,7 +125,7 @@ async def test_download_hf_uses_http_fallback_when_aria2_missing():
         )
         url_mock.assert_called_once()
         http_mock.assert_awaited_once()
-        assert any("aria2 unavailable" in m for m in logs)
+        assert any("aria2 不可用" in m for m in logs)
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_download_hf_aria2_failure_falls_back():
         )
         aria2.add_uri.assert_awaited_once()
         http_mock.assert_awaited_once()
-        assert any("aria2 failed" in m for m in logs)
+        assert any("aria2 下载" in m and "回退" in m for m in logs)
 
 
 @pytest.mark.asyncio

@@ -69,7 +69,7 @@ class DownloadQueue:
             flag = self._cancel_flags.setdefault(row["id"], asyncio.Event())
             flag.set()
             await self._remove_aria2_gids(row["id"])
-            await update_task(row["id"], status="cancelled", message="queue stopped")
+            await update_task(row["id"], status="cancelled", message="队列已停止")
             await self._publish(row["id"])
         for worker in self._workers:
             worker.cancel()
@@ -88,7 +88,7 @@ class DownloadQueue:
             message = ""
         else:
             dest_path = ""
-            message = f"Ollama pull; models stored under {ollama_root(settings.model_root)}"
+            message = f"Ollama 拉取；模型保存在 {ollama_root(settings.model_root)}"
 
         task_id = await insert_task(
             {
@@ -116,7 +116,7 @@ class DownloadQueue:
         if row is None:
             return
         if row["status"] in ("queued", "running"):
-            await update_task(task_id, status="cancelled", message="Cancelled")
+            await update_task(task_id, status="cancelled", message="已取消")
             await self._publish(task_id)
 
     async def retry(self, task_id: str) -> None:
@@ -179,7 +179,7 @@ class DownloadQueue:
         cancelled = self._cancel_flags.setdefault(task_id, asyncio.Event())
         if cancelled.is_set() or row["status"] in _TERMINAL:
             await self._finish_if_active(
-                task_id, status="cancelled", message="Cancelled"
+                task_id, status="cancelled", message="已取消"
             )
             return
 
@@ -187,7 +187,7 @@ class DownloadQueue:
         row = await get_task(task_id)
         await self._publish(task_id)
         if cancelled.is_set():
-            await update_task(task_id, status="cancelled", message="Cancelled")
+            await update_task(task_id, status="cancelled", message="已取消")
             await self._publish(task_id)
             return
 
@@ -215,13 +215,13 @@ class DownloadQueue:
 
         try:
             if cancelled.is_set():
-                await self._finish_if_active(task_id, status="cancelled", message="Cancelled")
+                await self._finish_if_active(task_id, status="cancelled", message="已取消")
                 return
             await self._run_download(row, on_progress, on_log, cancelled)
         except asyncio.CancelledError:
             if cancelled.is_set():
                 await self._finish_if_active(
-                    task_id, status="cancelled", message="Cancelled"
+                    task_id, status="cancelled", message="已取消"
                 )
             raise
         except Exception as exc:
@@ -229,7 +229,7 @@ class DownloadQueue:
             return
 
         if cancelled.is_set():
-            await self._finish_if_active(task_id, status="cancelled", message="Cancelled")
+            await self._finish_if_active(task_id, status="cancelled", message="已取消")
             return
         await self._finish_if_active(task_id, status="completed", speed_bps=0)
 
@@ -311,7 +311,7 @@ class DownloadQueue:
 
         if not found_any:
             raise RuntimeError(
-                f"Model not found on attempted sources: {', '.join(sources)}"
+                f"在尝试的源中未找到模型：{', '.join(sources)}"
             )
         raise RuntimeError("; ".join(errors) if errors else "Download failed")
 
