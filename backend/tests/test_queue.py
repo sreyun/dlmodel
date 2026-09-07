@@ -335,10 +335,23 @@ async def test_retry_clears_total_bytes(tmp_path, monkeypatch):
     failed = await get_task(tid)
     assert failed["total_bytes"] == 200
     await q.retry(tid)
-    queued = await get_task(tid)
-    assert queued["status"] == "queued"
-    assert queued["progress_bytes"] == 0
-    assert queued["total_bytes"] is None
+    # Worker may claim immediately after retry; assert counters were cleared.
+    seen_reset = False
+    for _ in range(40):
+        queued = await get_task(tid)
+        if (
+            queued["progress_bytes"] == 0
+            and queued["total_bytes"] is None
+            and queued["status"] in ("queued", "running")
+        ):
+            seen_reset = True
+            break
+        if queued["status"] == "completed":
+            # Finished before we sampled; still OK if second attempt ran.
+            seen_reset = fail_once["n"] >= 2
+            break
+        await asyncio.sleep(0.02)
+    assert seen_reset
     await _wait_status(tid, "completed", "failed")
     await q.stop()
 
@@ -503,3 +516,43 @@ async def test_completed_task_schedules_notify_webhook(tmp_path, monkeypatch):
         await asyncio.sleep(0.05)
     await q.stop()
     assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_started_notify_waits_for_progress_stats(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv(
+        "NOTIFY_FEISHU_WEBHOOK",
+        "https://open.feishu.cn/open-apis/bot/v2/hook/abc",
+    )
+    monkeypatch.setenv("NOTIFY_ON_STARTED", "1")
+    monkeypatch.setenv("NOTIFY_ON_COMPLETED", "0")
+    route = respx.post("https://open.feishu.cn/open-apis/bot/v2/hook/abc").mock(
+        return_value=Response(200, json={"code": 0})
+    )
+    gate = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await asyncio.sleep(0.05)
+        assert not route.called
+        await on_progress(5 * 1024 * 1024, 100 * 1024 * 1024, 2 * 1024 * 1024)
+        await gate.wait()
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    for _ in range(50):
+        if route.called:
+            break
+        await asyncio.sleep(0.05)
+    assert route.called
+    body = route.calls[0].request.content.decode("utf-8", errors="ignore")
+    assert "开始下载" in body or "\\u5f00\\u59cb\\u4e0b\\u8f7d" in body or "速率" in body
+    gate.set()
+    await _wait_status(tid, "completed", "failed", "cancelled")
+    await q.stop()

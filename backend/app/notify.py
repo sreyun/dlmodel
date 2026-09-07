@@ -20,6 +20,18 @@ _STATUS_ZH = {
     "cancelled": "已取消",
 }
 
+_SOURCE_ZH = {
+    "auto": "自动",
+    "huggingface": "Hugging Face",
+    "modelscope": "ModelScope",
+    "ollama": "Ollama",
+}
+
+_TARGET_ZH = {
+    "vllm": "vLLM",
+    "ollama": "Ollama",
+}
+
 _HOST_ALLOW = {
     "dingtalk": {"oapi.dingtalk.com"},
     "feishu": {"open.feishu.cn", "open.larksuite.com"},
@@ -47,10 +59,15 @@ def validate_webhook_url(channel: str, url: str) -> None:
         )
 
 
-def _fmt_bytes(n: int | None) -> str:
+def _fmt_bytes(n: int | float | None) -> str:
     if n is None:
         return "—"
-    value = float(n)
+    try:
+        value = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    if value < 0:
+        value = 0.0
     units = ["B", "KB", "MB", "GB", "TB"]
     i = 0
     while value >= 1024 and i < len(units) - 1:
@@ -59,23 +76,126 @@ def _fmt_bytes(n: int | None) -> str:
     return f"{value:.1f} {units[i]}" if i else f"{int(value)} {units[i]}"
 
 
+def _fmt_speed(bps: float | int | None) -> str:
+    if bps is None:
+        return "测算中"
+    try:
+        speed = float(bps)
+    except (TypeError, ValueError):
+        return "测算中"
+    if speed <= 0:
+        return "测算中"
+    return f"{_fmt_bytes(speed)}/s"
+
+
+def _fmt_eta(
+    progress_bytes: int | None,
+    total_bytes: int | None,
+    speed_bps: float | int | None,
+    *,
+    event: str,
+) -> str:
+    if event == "completed":
+        return "已完成"
+    if event in ("failed", "cancelled"):
+        return "—"
+    if not total_bytes:
+        return "总量未知，待测速后估算"
+    try:
+        total = int(total_bytes)
+        done = int(progress_bytes or 0)
+        speed = float(speed_bps or 0)
+    except (TypeError, ValueError):
+        return "待测速后估算"
+    remain = max(total - done, 0)
+    if remain <= 0:
+        return "即将完成"
+    if speed <= 0:
+        return "待测速后估算"
+    seconds = int((remain / speed) + 0.999)
+    if seconds < 60:
+        return f"约 {seconds} 秒"
+    if seconds < 3600:
+        return f"约 {(seconds + 59) // 60} 分钟"
+    hours = seconds / 3600
+    return f"约 {hours:.1f} 小时"
+
+
+def _progress_line(task: dict) -> str:
+    progress = task.get("progress_bytes") or 0
+    total = task.get("total_bytes")
+    try:
+        done = int(progress)
+    except (TypeError, ValueError):
+        done = 0
+    if total:
+        try:
+            total_n = int(total)
+        except (TypeError, ValueError):
+            return _fmt_bytes(done)
+        if total_n > 0:
+            pct = min(100.0, 100.0 * done / total_n)
+            return f"{pct:.1f}% · {_fmt_bytes(done)} / {_fmt_bytes(total_n)}"
+    return _fmt_bytes(done)
+
+
+def _default_note(event: str, task: dict) -> str:
+    if event == "running":
+        speed = task.get("speed_bps")
+        if speed and float(speed) > 0:
+            return "下载进行中，速率与 ETA 见上方。"
+        return "下载已启动，正在建立连接/测速…"
+    if event == "completed":
+        return "模型已就绪，可在模型库中查看。"
+    if event == "failed":
+        return "请到任务页查看详情后重试。"
+    if event == "cancelled":
+        return "任务已取消；可稍后重试。"
+    return ""
+
+
 def format_task_message(task: dict, event: str) -> str:
     title = _STATUS_ZH.get(event, event)
     name = task.get("name") or "未知模型"
-    source = task.get("source") or "—"
-    target = task.get("target") or "—"
-    progress = _fmt_bytes(task.get("progress_bytes"))
-    total = task.get("total_bytes")
-    size_line = f"{progress}" + (f" / {_fmt_bytes(total)}" if total else "")
-    msg = (task.get("message") or "").strip()
+    source = _SOURCE_ZH.get(task.get("source") or "", task.get("source") or "—")
+    target = _TARGET_ZH.get(task.get("target") or "", task.get("target") or "—")
+    task_id = str(task.get("id") or "")
+    revision = (task.get("revision") or "").strip()
+
     lines = [
         f"【dlmodel】{title}",
         f"模型：{name}",
         f"来源：{source} → {target}",
-        f"进度：{size_line}",
     ]
-    if msg and event in ("failed", "cancelled", "completed", "running"):
+    if revision:
+        lines.append(f"版本：{revision}")
+    if task_id:
+        lines.append(f"任务：#{task_id[:8]}")
+    lines.append(f"进度：{_progress_line(task)}")
+    lines.append(f"速率：{_fmt_speed(task.get('speed_bps'))}")
+    lines.append(
+        f"预计剩余：{_fmt_eta(task.get('progress_bytes'), task.get('total_bytes'), task.get('speed_bps'), event=event)}"
+    )
+
+    msg = (task.get("message") or "").strip()
+    # Drop low-value boilerplate that duplicates structured fields.
+    skip_notes = {
+        "正在准备下载…",
+        "下载已完成",
+        "已取消",
+        "已加入队列，等待调度…",
+    }
+    if msg and msg not in skip_notes and event in (
+        "failed",
+        "cancelled",
+        "completed",
+        "running",
+    ):
         lines.append(f"说明：{msg[:200]}")
+    else:
+        note = _default_note(event, task)
+        if note:
+            lines.append(f"说明：{note}")
     return "\n".join(lines)
 
 

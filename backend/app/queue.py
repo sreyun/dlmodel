@@ -84,6 +84,7 @@ class DownloadQueue:
         self._stopping = False
         self._busy_dests: set[str] = set()
         self._notify_tasks: set[asyncio.Task] = set()
+        self._started_notified: set[str] = set()
 
     async def start(self) -> None:
         if self._started:
@@ -182,6 +183,7 @@ class DownloadQueue:
             self._cancel_flags.clear()
             self._task_gids.clear()
             self._busy_dests.clear()
+            self._started_notified.clear()
             if self._notify_tasks:
                 await asyncio.gather(*list(self._notify_tasks), return_exceptions=True)
                 self._notify_tasks.clear()
@@ -269,6 +271,7 @@ class DownloadQueue:
             return
         self._cancel_flags[task_id] = asyncio.Event()
         self._task_gids[task_id] = []
+        self._started_notified.discard(task_id)
         await self._pending.put(task_id)
         await self._publish(task_id)
 
@@ -365,7 +368,6 @@ class DownloadQueue:
             task_id[:8],
             (row or {}).get("name"),
         )
-        await self._schedule_notify(task_id, "running")
         if cancelled.is_set():
             await self._finish_if_active(
                 task_id, status="cancelled", message=self._cancel_message()
@@ -387,6 +389,14 @@ class DownloadQueue:
                 speed_bps=speed_bps,
             )
             await self._publish(task_id)
+            # Defer "started" notify until we have real transfer stats (rate/ETA).
+            if task_id not in self._started_notified and (
+                (speed_bps is not None and float(speed_bps) > 0)
+                or progress_bytes > 0
+                or (total_bytes is not None and int(total_bytes) > 0)
+            ):
+                self._started_notified.add(task_id)
+                await self._schedule_notify(task_id, "running")
 
         async def on_log(message: str) -> None:
             if cancelled.is_set():
@@ -610,6 +620,8 @@ class DownloadQueue:
                 (fields.get("message") or "")[:120],
             )
         if status in ("completed", "failed", "cancelled"):
+            # If started was never sent (tiny/instant finishes), skip; terminal covers it.
+            self._started_notified.discard(task_id)
             await self._schedule_notify(task_id, status)
 
     async def _publish(self, task_id: str) -> None:

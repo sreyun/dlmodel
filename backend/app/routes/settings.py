@@ -299,8 +299,11 @@ async def notify_test_route(
     sample = (
         "【dlmodel】通知测试\n"
         "模型：demo/test-model\n"
-        "来源：auto → vllm\n"
-        "进度：—\n"
+        "来源：自动 → vLLM\n"
+        "任务：#testdemo\n"
+        "进度：12.5% · 128.0 MB / 1.0 GB\n"
+        "速率：8.0 MB/s\n"
+        "预计剩余：约 2 分钟\n"
         "说明：这是一条来自设置页的测试消息。"
     )
     sent = 0

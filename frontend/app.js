@@ -1369,7 +1369,7 @@ function renderSettings(gen) {
       </section>
       <section class="panel section-card">
         <h3>消息推送</h3>
-        <p class="lead">配置钉钉 / 飞书 / 企业微信机器人 Webhook。仅在任务状态变更时推送摘要（含当前进度），不会按百分比刷屏。</p>
+        <p class="lead">配置钉钉 / 飞书 / 企业微信机器人 Webhook。状态变更时推送摘要（进度、速率、预计剩余），不会按百分比刷屏；「开始下载」在测速后发送。</p>
         <div class="form-grid">
           <label class="field full">
             <span>钉钉机器人 Webhook（留空表示不修改）</span>

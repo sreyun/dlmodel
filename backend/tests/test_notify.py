@@ -29,22 +29,69 @@ def test_validate_webhook_hosts():
         validate_webhook_url("dingtalk", "https://evil.example/hook")
 
 
-def test_format_task_message_includes_progress():
+def test_format_task_message_includes_progress_rate_and_eta():
     text = format_task_message(
         {
+            "id": "abcdef1234567890",
             "name": "org/model",
             "source": "huggingface",
             "target": "vllm",
-            "progress_bytes": 1024,
+            "revision": "main",
+            "progress_bytes": 100 * 1024 * 1024,
+            "total_bytes": 400 * 1024 * 1024,
+            "speed_bps": 10 * 1024 * 1024,
+            "message": "正在下载 weights.bin",
+        },
+        "running",
+    )
+    assert "开始下载" in text
+    assert "org/model" in text
+    assert "Hugging Face → vLLM" in text
+    assert "版本：main" in text
+    assert "任务：#abcdef12" in text
+    assert "25.0%" in text
+    assert "速率：10.0 MB/s" in text
+    assert "预计剩余：约 30 秒" in text
+    assert "正在下载 weights.bin" in text
+
+
+def test_format_task_message_started_without_speed_uses_placeholders():
+    text = format_task_message(
+        {
+            "id": "xyz",
+            "name": "Qwen/demo",
+            "source": "auto",
+            "target": "vllm",
+            "progress_bytes": 0,
+            "total_bytes": None,
+            "speed_bps": None,
+            "message": "正在准备下载…",
+        },
+        "running",
+    )
+    assert "自动 → vLLM" in text
+    assert "速率：测算中" in text
+    assert "预计剩余：总量未知，待测速后估算" in text
+    assert "正在准备下载" not in text
+    assert "下载已启动" in text
+
+
+def test_format_task_message_completed_eta():
+    text = format_task_message(
+        {
+            "name": "org/model",
+            "source": "modelscope",
+            "target": "vllm",
+            "progress_bytes": 2048,
             "total_bytes": 2048,
-            "message": "done",
+            "speed_bps": 0,
+            "message": "下载已完成",
         },
         "completed",
     )
     assert "下载完成" in text
-    assert "org/model" in text
-    assert "1.0 KB" in text
-    assert "2.0 KB" in text
+    assert "预计剩余：已完成" in text
+    assert "ModelScope → vLLM" in text
 
 
 @pytest.mark.asyncio
