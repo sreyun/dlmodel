@@ -40,6 +40,8 @@ Bind mounts (created on first start):
 | `./data/app` | `/data` (`DATA_DIR`) | SQLite and app state |
 | `./data/aria2` | `/config` | aria2 config |
 
+`web` and `aria2` share `./data/models`. The default stack runs aria2 as root (`PUID=0` / `PGID=0`) so it can write the same files as `web`. If you bind-mount a host directory with restrictive ownership, make `./data/models` writable by the container user (root in the default compose) or downloads fall back to single-stream HTTP.
+
 On-disk layout:
 
 - vLLM / Hugging Face: `{MODEL_ROOT}/hf/<org>/<repo>/`

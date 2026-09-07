@@ -34,6 +34,8 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "/api/auth/verify" in js.text
         assert "/api/downloads" in js.text
         assert "1000" in js.text
+        assert "if (hfToken) body.hf_token = hfToken" in js.text
+        assert "if (msToken) body.modelscope_api_token = msToken" in js.text
         css = client.get("/styles.css")
         assert css.status_code == 200
         assert css.text.strip()

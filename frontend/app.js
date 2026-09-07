@@ -472,13 +472,15 @@ function renderSettings() {
     event.preventDefault();
     const body = {
       hf_endpoint: $("hf_endpoint").value.trim(),
-      hf_token: $("hf_token").value,
-      modelscope_api_token: $("modelscope_api_token").value,
       download_concurrency: Number($("download_concurrency").value),
       aria2_connections: Number($("aria2_connections").value),
       ollama_base_url: $("ollama_base_url").value.trim(),
       vllm_base_url: $("vllm_base_url").value.trim(),
     };
+    const hfToken = $("hf_token").value.trim();
+    if (hfToken) body.hf_token = hfToken;
+    const msToken = $("modelscope_api_token").value.trim();
+    if (msToken) body.modelscope_api_token = msToken;
     await guarded(async () => {
       await apiJson("/api/settings", { method: "PUT", body: JSON.stringify(body) });
       $("set-msg").innerHTML = flash("ok", "Settings saved");

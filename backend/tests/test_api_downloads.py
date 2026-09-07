@@ -84,6 +84,67 @@ def test_empty_hf_token_env_exposed_as_null(tmp_path, monkeypatch):
     assert body["modelscope_api_token"] is None
 
 
+def test_blank_token_put_does_not_shadow_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv("HF_TOKEN", "env-hf-token")
+    monkeypatch.setenv("MODELSCOPE_API_TOKEN", "env-ms-token")
+    app = create_app()
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        r = client.put(
+            "/api/settings",
+            headers=headers,
+            json={
+                "hf_endpoint": "https://example.test",
+                "hf_token": "",
+                "modelscope_api_token": "   ",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["hf_endpoint"] == "https://example.test"
+        assert body["hf_token"] == "env-hf-token"
+        assert body["modelscope_api_token"] == "env-ms-token"
+        again = client.get("/api/settings", headers=headers).json()
+        assert again["hf_token"] == "env-hf-token"
+        assert again["modelscope_api_token"] == "env-ms-token"
+
+
+def test_create_download_rejects_traversal(client):
+    headers = {"Authorization": "Bearer secret"}
+    r = client.post(
+        "/api/downloads",
+        headers=headers,
+        json={"name": "foo/../../../tmp/x", "source": "huggingface", "target": "vllm"},
+    )
+    assert r.status_code == 400
+    assert "path traversal" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_empty_sqlite_token_does_not_override_env(tmp_path, monkeypatch):
+    import os
+
+    from app.db import init_db, set_setting
+    from app.routes.settings import apply_sqlite_overrides, effective_settings
+
+    monkeypatch.setenv("HF_TOKEN", "env-hf-token")
+    monkeypatch.setenv("MODELSCOPE_API_TOKEN", "env-ms-token")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    await init_db(str(tmp_path / "app.db"))
+    await set_setting("hf_token", "")
+    await set_setting("modelscope_api_token", "  ")
+    await apply_sqlite_overrides()
+    assert os.environ["HF_TOKEN"] == "env-hf-token"
+    assert os.environ["MODELSCOPE_API_TOKEN"] == "env-ms-token"
+    merged = await effective_settings()
+    assert merged["hf_token"] == "env-hf-token"
+    assert merged["modelscope_api_token"] == "env-ms-token"
+
+
 def test_events_accepts_token_query(client):
     headers = {"Authorization": "Bearer secret"}
     r = client.post(

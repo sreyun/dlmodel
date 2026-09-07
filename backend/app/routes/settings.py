@@ -47,13 +47,22 @@ def _coerce(key: str, raw: str):
     return raw
 
 
+def _usable_override(key: str, raw: str | None) -> bool:
+    if raw is None:
+        return False
+    if key in _TOKEN_KEYS and optional_secret(raw) is None:
+        return False
+    return True
+
+
 async def effective_settings() -> dict:
     base = get_settings()
     out = {key: getattr(base, key) for key in _MERGE_KEYS}
     for key in _MERGE_KEYS:
         raw = await get_setting(key)
-        if raw is not None:
-            out[key] = _coerce(key, raw)
+        if not _usable_override(key, raw):
+            continue
+        out[key] = _coerce(key, raw)
     for key in _TOKEN_KEYS:
         out[key] = optional_secret(out.get(key))
     return out
@@ -62,8 +71,9 @@ async def effective_settings() -> dict:
 async def apply_sqlite_overrides() -> None:
     for key, env_name in _ENV_NAMES.items():
         raw = await get_setting(key)
-        if raw is not None:
-            os.environ[env_name] = raw
+        if not _usable_override(key, raw):
+            continue
+        os.environ[env_name] = raw
 
 
 @router.get("/api/settings")
@@ -80,5 +90,7 @@ async def put_settings_route(
         if key not in _ENV_NAMES:
             continue
         stored = "" if value is None else str(value)
+        if key in _TOKEN_KEYS and optional_secret(stored) is None:
+            continue
         await set_setting(key, stored)
     return await effective_settings()

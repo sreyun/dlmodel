@@ -14,6 +14,9 @@ services:
     environment:
       RPC_SECRET: ${ARIA2_RPC_SECRET:-dlmodel}
       RPC_PORT: 6800
+      # Match web (root) so RPC writes succeed under the shared /models mount.
+      PUID: 0
+      PGID: 0
     volumes:
       - ./data/models:/models
       - ./data/aria2:/config

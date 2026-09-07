@@ -54,7 +54,10 @@ async def create_download(
     request: Request,
     _: None = Depends(require_admin),
 ) -> dict:
-    task_id = await request.app.state.queue.enqueue(payload)
+    try:
+        task_id = await request.app.state.queue.enqueue(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": task_id}
 
 

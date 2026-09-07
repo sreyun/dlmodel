@@ -12,7 +12,7 @@ from app.downloaders import (
     ms_repo_exists,
 )
 from app.models_schema import DownloadCreate
-from app.paths import hf_model_dir, ollama_root
+from app.paths import hf_model_dir, ollama_root, parse_model_name
 from app.routes.settings import effective_settings
 from app.source_resolve import resolve_source
 
@@ -82,6 +82,7 @@ class DownloadQueue:
 
     async def enqueue(self, payload: DownloadCreate) -> str:
         settings = get_settings()
+        parse_model_name(payload.name)
         if payload.target == "vllm":
             dest_path = str(hf_model_dir(settings.model_root, payload.name))
             message = ""
