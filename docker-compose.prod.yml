@@ -1,0 +1,53 @@
+# Production overlay — pull prebuilt image from Huawei SWR (or any registry).
+# Prerequisites:
+#   1. docker login swr.cn-east-3.myhuaweicloud.com
+#   2. export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel:vX.Y.Z
+#   3. Strong ADMIN_TOKEN in .env (do NOT set ALLOW_INSECURE_ADMIN=1)
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  web:
+    image: ${DLMODEL_IMAGE:?set DLMODEL_IMAGE to your SWR tag, e.g. swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0}
+    pull_policy: always
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:8080"
+    environment:
+      ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-0}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  aria2:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  ollama:
+    ports:
+      - "${OLLAMA_BIND:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+    restart: unless-stopped
+
+  vllm:
+    ports:
+      - "${VLLM_BIND:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
+    restart: unless-stopped

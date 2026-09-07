@@ -1,38 +1,78 @@
+# Shared base stack for dlmodel (web + aria2 + optional inference profiles).
+# Dev:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Prod: DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<ns>/dlmodel:vX.Y.Z \
+#         docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+x-web-env: &web-env
+  MODEL_ROOT: ${MODEL_ROOT:-/models}
+  DATA_DIR: ${DATA_DIR:-/data}
+  HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+  HF_TOKEN: ${HF_TOKEN:-}
+  MODELSCOPE_API_TOKEN: ${MODELSCOPE_API_TOKEN:-}
+  ARIA2_RPC_URL: ${ARIA2_RPC_URL:-http://aria2:6800/jsonrpc}
+  ARIA2_RPC_SECRET: ${ARIA2_RPC_SECRET:-dlmodel}
+  DOWNLOAD_CONCURRENCY: ${DOWNLOAD_CONCURRENCY:-2}
+  ARIA2_CONNECTIONS: ${ARIA2_CONNECTIONS:-16}
+  DOWNLOAD_RETRIES: ${DOWNLOAD_RETRIES:-3}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme}
+  ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-0}
+
 services:
   web:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    ports: ["127.0.0.1:8080:8080"]
-    env_file: .env
+    image: ${DLMODEL_IMAGE:-dlmodel:local}
+    environment:
+      <<: *web-env
+    env_file:
+      - .env
     volumes:
-      - ./data/models:/models
-      - ./data/app:/data
-    depends_on: [aria2]
+      - ${HOST_MODEL_ROOT:-./data/models}:/models
+      - ${HOST_DATA_DIR:-./data/app}:/data
+    depends_on:
+      aria2:
+        condition: service_started
+    networks: [dlmodel]
+
   aria2:
-    image: p3terx/aria2-pro:latest
+    image: ${ARIA2_IMAGE:-p3terx/aria2-pro:latest}
     environment:
       RPC_SECRET: ${ARIA2_RPC_SECRET:-dlmodel}
       RPC_PORT: 6800
-      # Match web (root) so RPC writes succeed under the shared /models mount.
-      PUID: 0
-      PGID: 0
+      # Match web so RPC writes succeed under the shared /models mount.
+      PUID: ${ARIA2_PUID:-0}
+      PGID: ${ARIA2_PGID:-0}
     volumes:
-      - ./data/models:/models
-      - ./data/aria2:/config
+      - ${HOST_MODEL_ROOT:-./data/models}:/models
+      - ${HOST_ARIA2_DIR:-./data/aria2}:/config
+    networks: [dlmodel]
+
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:latest
-    ports: ["127.0.0.1:11434:11434"]
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     volumes:
-      - ./data/models/ollama:/root/.ollama
+      - ${HOST_MODEL_ROOT:-./data/models}/ollama:/root/.ollama
+    networks: [dlmodel]
+
   vllm:
     profiles: ["vllm"]
-    image: vllm/vllm-openai:latest
-    runtime: nvidia
-    ports: ["127.0.0.1:8000:8000"]
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    runtime: ${VLLM_RUNTIME:-nvidia}
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - ./data/models/hf:/models/hf
-    command: ["--model", "${VLLM_MODEL:-/models/hf}", "--host", "0.0.0.0", "--port", "8000"]
+      - ${HOST_MODEL_ROOT:-./data/models}/hf:/models/hf
+    command:
+      [
+        "--model",
+        "${VLLM_MODEL:-/models/hf}",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    networks: [dlmodel]
+
+networks:
+  dlmodel:
+    driver: bridge

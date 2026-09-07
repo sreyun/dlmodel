@@ -1,0 +1,98 @@
+name: Build and push Huawei SWR
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to push (default: latest)"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+
+env:
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_REGION: cn-east-3
+  IMAGE_NAME: dlmodel
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          NS="${{ vars.HW_SWR_NAMESPACE }}"
+          if [ -z "$NS" ]; then
+            NS="${{ secrets.HW_SWR_NAMESPACE }}"
+          fi
+          if [ -z "$NS" ]; then
+            NS="sreyun"
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            TAG="${TAG:-latest}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          REPO="${SWR_REGISTRY}/${NS}/${IMAGE_NAME}"
+          {
+            echo "namespace=${NS}"
+            echo "tag=${TAG}"
+            echo "repo=${REPO}"
+            echo "image_tag=${REPO}:${TAG}"
+            echo "image_latest=${REPO}:latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will push: ${REPO}:${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Huawei SWR
+        shell: bash
+        env:
+          HW_ACCESS_KEY: ${{ secrets.HW_ACCESS_KEY }}
+          HW_SECRET_KEY: ${{ secrets.HW_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HW_ACCESS_KEY:-}" ] || [ -z "${HW_SECRET_KEY:-}" ]; then
+            echo "Missing HW_ACCESS_KEY / HW_SECRET_KEY repository secrets." >&2
+            exit 1
+          fi
+          # Huawei SWR long-term login password = HMAC-SHA256(SK, AK) as hex
+          LOGIN_PASS="$(printf '%s' "$HW_ACCESS_KEY" | openssl dgst -binary -sha256 -hmac "$HW_SECRET_KEY" | xxd -p -c 256)"
+          echo "$LOGIN_PASS" | docker login -u "${SWR_REGION}@${HW_ACCESS_KEY}" --password-stdin "$SWR_REGISTRY"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image_tag }}
+            ${{ steps.meta.outputs.image_latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        run: |
+          {
+            echo "## Huawei SWR image"
+            echo ""
+            echo "- Registry: \`${SWR_REGISTRY}\`"
+            echo "- Namespace: \`${{ steps.meta.outputs.namespace }}\`"
+            echo "- Tags: \`${{ steps.meta.outputs.tag }}\`, \`latest\`"
+            echo "- Pull: \`docker pull ${{ steps.meta.outputs.image_tag }}\`"
+            echo "- Prod compose: \`DLMODEL_IMAGE=${{ steps.meta.outputs.image_tag }} docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,22 @@
+# Keep build context small and free of local secrets/data.
+.git
+.github
+.worktrees
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/venv
+**/.env
+**/.env.*
+!**/.env.example
+data
+docs
+**/agent-transcripts
+**/*.md
+!README.md
+backend/tests
+**/.DS_Store
+**/Thumbs.db

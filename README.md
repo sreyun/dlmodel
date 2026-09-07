@@ -2,7 +2,7 @@
 
 Download Hugging Face and ModelScope models into host volumes, with a small web UI and an aria2 sidecar. Optional Compose profiles attach Ollama or vLLM to the same model roots.
 
-## Quick start
+## Quick start (development)
 
 1. Copy the example env file and set a real admin token:
 
@@ -12,13 +12,59 @@ Download Hugging Face and ModelScope models into host volumes, with a small web 
 
    Edit `.env` and change `ADMIN_TOKEN` from `change-me-to-a-long-random-string` to a long random secret.
 
-2. Build and start the default stack (`web` + `aria2`):
+2. Build and start the **dev** stack (`web` + `aria2`, image built locally):
 
    ```bash
-   docker compose up -d --build
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
    ```
 
 3. Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with `ADMIN_TOKEN`.
+
+## Production (Huawei SWR image)
+
+CI builds and pushes `swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel` on every `v*` tag.
+
+```bash
+cp .env.example .env   # set a strong ADMIN_TOKEN; do NOT enable ALLOW_INSECURE_ADMIN
+export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0
+docker login swr.cn-east-3.myhuaweicloud.com
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Optional Compose convenience:
+
+```bash
+# .env
+COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0
+```
+
+### CI secrets / variables
+
+Repository **Actions secrets** (already used by workflow):
+
+| Secret | Purpose |
+|--------|---------|
+| `HW_ACCESS_KEY` | Huawei IAM Access Key Id (AK) |
+| `HW_SECRET_KEY` | Huawei IAM Secret Access Key (SK) |
+
+Optional:
+
+| Name | Where | Purpose |
+|------|-------|---------|
+| `HW_SWR_NAMESPACE` | Actions **variable** (preferred) or secret | SWR organization name (default `sreyun`) |
+
+Create the organization once in [SWR console](https://console.huaweicloud.com/swr) (region **华东-上海一 / cn-east-3**) so the first push can create the `dlmodel` repository.
+
+Tag release flow:
+
+```bash
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
+# → GitHub Action "Build and push Huawei SWR" runs automatically
+```
+
+Manual rebuild: Actions → **Build and push Huawei SWR** → Run workflow.
 
 ## China defaults
 
@@ -37,7 +83,7 @@ Tasks and settings live in SQLite at `{DATA_DIR}/app.db` (compose: `./data/app`)
 
 ## Robot notifications
 
-Settings → 消息推送 supports DingTalk / Feishu / WeCom group robots (HTTPS webhook URLs only). Default events: download completed / failed. Optional: started / cancelled. You can also set `NOTIFY_*` in `.env`; prefer saving in the UI.
+Settings → 消息推送 supports DingTalk / Feishu / WeCom group robots (HTTPS webhook URLs only). Default events: download completed / failed. Optional: started / cancelled. Started messages include progress, rate, and ETA after first measurable transfer. You can also set `NOTIFY_*` in `.env`; prefer saving in the UI.
 
 ## Model roots
 
@@ -61,9 +107,8 @@ On-disk layout:
 Ollama and vLLM are **not** started by default. Management and downloads work without them.
 
 ```bash
-docker compose --profile ollama up -d --build
-docker compose --profile vllm up -d --build
-docker compose --profile ollama --profile vllm up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile ollama up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile vllm up -d --build
 ```
 
 - **Ollama** (`--profile ollama`) — API at `http://127.0.0.1:11434`. The web service uses `OLLAMA_BASE_URL=http://ollama:11434`.
@@ -83,13 +128,13 @@ See `.env.example`. Important variables:
 |----------|---------|
 | `ADMIN_TOKEN` | Bearer token for the UI and `/api` |
 | `MODEL_ROOT` / `DATA_DIR` | Model and SQLite volumes |
+| `DLMODEL_IMAGE` | Container image for production compose |
 | `HF_ENDPOINT` / `HF_TOKEN` | Hugging Face mirror and token |
 | `MODELSCOPE_API_TOKEN` | ModelScope token |
 | `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | aria2 JSON-RPC (secret must match the `aria2` service) |
 | `DOWNLOAD_CONCURRENCY` / `ARIA2_CONNECTIONS` | Parallel tasks / aria2 per-file connections |
 | `DOWNLOAD_RETRIES` | Extra retries for transient SSL/network errors |
-| `NOTIFY_DINGTALK_WEBHOOK` / `NOTIFY_FEISHU_WEBHOOK` / `NOTIFY_WECOM_WEBHOOK` | Group robot webhooks (optional; UI preferred) |
-| `NOTIFY_ON_COMPLETED` / `NOTIFY_ON_FAILED` / `NOTIFY_ON_STARTED` / `NOTIFY_ON_CANCELLED` | Event toggles (`1`/`0`) |
+| `NOTIFY_*` | Group robot webhooks / event toggles |
 | `OLLAMA_BASE_URL` / `VLLM_BASE_URL` | Inference endpoints when profiles (or remote servers) are used |
 | `VLLM_MODEL` | Model path for the optional `vllm` service |
 
