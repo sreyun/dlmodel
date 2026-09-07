@@ -257,22 +257,74 @@ async def test_ms_repo_exists_transport_error_raises():
 
 
 @pytest.mark.asyncio
-async def test_download_modelscope_calls_snapshot_download():
-    with patch("app.downloaders.modelscope.snapshot_download") as sd:
-        sd.return_value = str(Path("/tmp/modelscope/repo"))
+async def test_download_modelscope_calls_snapshot_download(tmp_path):
+    dest = tmp_path / "dest"
+    progresses: list[tuple[int, int | None]] = []
+
+    def fake_snapshot_download(**kwargs):
+        local = Path(kwargs["local_dir"])
+        local.mkdir(parents=True, exist_ok=True)
+        (local / "weights.bin").write_bytes(b"x" * 2048)
+        return str(local)
+
+    with patch(
+        "app.downloaders.modelscope.snapshot_download",
+        side_effect=fake_snapshot_download,
+    ) as sd:
 
         async def on_progress(d, t, s):
-            pass
+            progresses.append((d, t))
 
         async def on_log(m):
             pass
 
         await download_modelscope(
             "damo/model",
-            Path("/tmp/dest"),
+            dest,
             token=None,
             revision="v1.0",
             on_progress=on_progress,
             on_log=on_log,
         )
         sd.assert_called_once()
+    assert progresses
+    assert any(done >= 2048 for done, _total in progresses)
+
+
+@pytest.mark.asyncio
+async def test_download_modelscope_polls_progress_while_running(tmp_path):
+    import time
+
+    dest = tmp_path / "dest"
+    progresses: list[int] = []
+
+    def fake_snapshot_download(**kwargs):
+        local = Path(kwargs["local_dir"])
+        local.mkdir(parents=True, exist_ok=True)
+        time.sleep(1.2)
+        (local / "chunk.bin").write_bytes(b"y" * 4096)
+        time.sleep(0.2)
+        return str(local)
+
+    with patch(
+        "app.downloaders.modelscope.snapshot_download",
+        side_effect=fake_snapshot_download,
+    ):
+
+        async def on_progress(d, t, s):
+            progresses.append(d)
+
+        async def on_log(m):
+            pass
+
+        await download_modelscope(
+            "damo/model",
+            dest,
+            token=None,
+            revision=None,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+
+    assert len(progresses) >= 2
+    assert max(progresses) >= 4096

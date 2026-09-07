@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 
 import requests
@@ -8,6 +9,19 @@ from modelscope.hub.api import HubApi
 
 from app.config import optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 async def ms_repo_exists(name: str, token: str | None) -> bool:
@@ -31,7 +45,10 @@ async def download_modelscope(
     on_progress: ProgressCallback,
     on_log: LogCallback,
 ) -> None:
-    await on_log(f"Starting ModelScope download for {name}")
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    await on_log(f"正在从 ModelScope 下载 {name}…")
+    await on_progress(0, None, None)
 
     def _download() -> str:
         return snapshot_download(
@@ -41,5 +58,30 @@ async def download_modelscope(
             token=optional_secret(token),
         )
 
-    result = await asyncio.to_thread(_download)
+    download_task = asyncio.create_task(asyncio.to_thread(_download))
+    last_size = _dir_size_bytes(dest)
+    last_ts = time.monotonic()
+    last_log_ts = last_ts
+
+    try:
+        while not download_task.done():
+            await asyncio.sleep(0.8)
+            size = _dir_size_bytes(dest)
+            now = time.monotonic()
+            elapsed = max(now - last_ts, 0.001)
+            speed = (size - last_size) / elapsed if size >= last_size else None
+            await on_progress(size, None, float(speed) if speed and speed > 0 else None)
+            if size != last_size and (now - last_log_ts) >= 3.0:
+                await on_log(f"ModelScope 已下载 {size} 字节…")
+                last_log_ts = now
+            last_size = size
+            last_ts = now
+        result = await download_task
+    except Exception:
+        if not download_task.done():
+            download_task.cancel()
+        raise
+
+    final_size = _dir_size_bytes(dest)
+    await on_progress(final_size, final_size if final_size else None, 0.0)
     await on_log(f"ModelScope 下载完成：{result}")

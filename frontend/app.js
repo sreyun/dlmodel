@@ -102,11 +102,61 @@ function fmtSpeed(bps) {
   return `${fmtBytes(bps)}/s`;
 }
 
-function progressLabel(task) {
-  if (!task.total_bytes) return `${fmtBytes(task.progress_bytes)}`;
-  const pct = Math.min(100, (100 * Number(task.progress_bytes || 0)) / Number(task.total_bytes));
-  return `${pct.toFixed(1)}% (${fmtBytes(task.progress_bytes)} / ${fmtBytes(task.total_bytes)})`;
+function fmtEta(progressBytes, totalBytes, speedBps) {
+  if (!totalBytes || !speedBps || speedBps <= 0) return null;
+  const remain = Math.max(totalBytes - (progressBytes || 0), 0);
+  if (remain <= 0) return "即将完成";
+  const seconds = Math.ceil(remain / speedBps);
+  if (seconds < 60) return `约 ${seconds} 秒`;
+  if (seconds < 3600) return `约 ${Math.ceil(seconds / 60)} 分钟`;
+  return `约 ${(seconds / 3600).toFixed(1)} 小时`;
 }
+
+function progressPct(task) {
+  if (!task.total_bytes || !Number(task.total_bytes)) return null;
+  return Math.min(100, (100 * Number(task.progress_bytes || 0)) / Number(task.total_bytes));
+}
+
+function progressLabel(task) {
+  const pct = progressPct(task);
+  if (pct == null) {
+    if (task.status === "running" || task.status === "queued") {
+      return `已下载 ${fmtBytes(task.progress_bytes)}`;
+    }
+    return fmtBytes(task.progress_bytes);
+  }
+  return `${pct.toFixed(1)}% · ${fmtBytes(task.progress_bytes)} / ${fmtBytes(task.total_bytes)}`;
+}
+
+function friendlyMessage(message, status) {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    if (status === "queued") return "等待调度开始…";
+    if (status === "running") return "正在准备下载…";
+    if (status === "completed") return "下载已完成";
+    return "";
+  }
+  const lower = raw.toLowerCase();
+  if (lower.includes("illegal header value") && lower.includes("bearer")) {
+    return "HF Token 为空或格式无效。请到「设置」填写有效 Token，或清空无效配置后重试。";
+  }
+  if (lower.includes("401") || lower.includes("unauthorized")) {
+    return "鉴权失败，请检查 HF / ModelScope Token。";
+  }
+  if (lower.includes("not found") || raw.includes("未找到模型")) {
+    return "未找到该模型，请确认名称与下载源是否正确。";
+  }
+  return raw;
+}
+
+function taskSummary(tasks) {
+  const counts = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+  tasks.forEach((t) => {
+    if (counts[t.status] != null) counts[t.status] += 1;
+  });
+  return counts;
+}
+
 
 function statusLabel(status) {
   return STATUS_LABEL[status] || status;
@@ -222,7 +272,12 @@ function renderDownload(gen) {
   const root = appRoot();
   if (!root) return;
   setHtml(root, `
-    <h1>下载模型</h1>
+    <div class="page-head">
+      <div>
+        <h1>下载模型</h1>
+        <p>填写模型名即可开始。推荐源选「自动」，国内优先魔搭并回落 HF 镜像。</p>
+      </div>
+    </div>
     <div id="dl-msg"></div>
     <div class="panel">
       <form id="dl-form">
@@ -286,20 +341,45 @@ function renderDownload(gen) {
   });
 }
 
-function taskRow(task) {
+function taskCard(task) {
   const canCancel = !TERMINAL.has(task.status);
   const canRetry = task.status === "failed" || task.status === "cancelled";
-  return `<tr>
-    <td class="mono" title="${esc(task.id)}">${esc(String(task.id).slice(0, 8))}</td>
-    <td>${esc(task.name)}<div class="muted">${esc(sourceLabel(task.source))} → ${esc(targetLabel(task.target))}</div></td>
-    <td class="status ${esc(task.status)}">${esc(statusLabel(task.status))}</td>
-    <td>${esc(progressLabel(task))}<div class="muted">${esc(fmtSpeed(task.speed_bps))}</div></td>
-    <td>${esc(task.message || "")}</td>
-    <td>
-      <button data-act="cancel" data-id="${esc(task.id)}" ${canCancel ? "" : "disabled"}>取消</button>
-      <button data-act="retry" data-id="${esc(task.id)}" ${canRetry ? "" : "disabled"}>重试</button>
-    </td>
-  </tr>`;
+  const pct = progressPct(task);
+  const eta = fmtEta(task.progress_bytes, task.total_bytes, task.speed_bps);
+  const msg = friendlyMessage(task.message, task.status);
+  const fillClass = [
+    "progress-fill",
+    task.status === "completed" ? "done" : "",
+    task.status === "failed" ? "failed" : "",
+    (task.status === "running" || task.status === "queued") && pct == null ? "indeterminate" : "",
+  ].filter(Boolean).join(" ");
+  const width = pct == null
+    ? (task.status === "failed" || task.status === "completed" ? 100 : 35)
+    : pct;
+  return `<article class="task-card ${task.status === "running" ? "is-running" : ""}" data-id="${esc(task.id)}">
+    <div class="task-top">
+      <div>
+        <div class="task-title">${esc(task.name)}</div>
+        <div class="task-meta">
+          <span class="chip status-${esc(task.status)}">${esc(statusLabel(task.status))}</span>
+          <span class="chip">${esc(sourceLabel(task.source))} → ${esc(targetLabel(task.target))}</span>
+          <span class="chip mono" title="${esc(task.id)}">#${esc(String(task.id).slice(0, 8))}</span>
+        </div>
+      </div>
+      <div class="task-actions">
+        <button data-act="cancel" data-id="${esc(task.id)}" ${canCancel ? "" : "disabled"}>取消</button>
+        <button class="primary" data-act="retry" data-id="${esc(task.id)}" ${canRetry ? "" : "disabled"}>重试</button>
+      </div>
+    </div>
+    <div class="progress-block">
+      <div class="progress-row">
+        <span>${esc(progressLabel(task))}</span>
+        <span class="muted">${esc(fmtSpeed(task.speed_bps))}${eta ? ` · ETA ${eta}` : ""}</span>
+      </div>
+      <div class="progress-track"><div class="${fillClass}" style="width:${width}%"></div></div>
+    </div>
+    ${msg ? `<div class="task-message ${task.status === "failed" ? "error" : ""}">${esc(msg)}</div>` : ""}
+  </article>`;
 }
 
 async function refreshTasks(gen) {
@@ -309,13 +389,23 @@ async function refreshTasks(gen) {
   try {
     const tasks = await apiJson("/api/downloads");
     if (!stillOn("tasks", myGen)) return;
-    const body = $("task-body");
+    const counts = taskSummary(tasks);
+    const stats = $("task-stats");
+    if (stats) {
+      setHtml(stats, `
+        <div class="stat"><div class="label">进行中</div><div class="value">${counts.running}</div></div>
+        <div class="stat"><div class="label">排队中</div><div class="value">${counts.queued}</div></div>
+        <div class="stat"><div class="label">已完成</div><div class="value">${counts.completed}</div></div>
+        <div class="stat"><div class="label">失败</div><div class="value">${counts.failed}</div></div>
+      `);
+    }
+    const body = $("task-list");
     if (!body) return;
     setHtml(
       body,
       tasks.length
-        ? tasks.map(taskRow).join("")
-        : `<tr><td colspan="6" class="empty">暂无下载任务。</td></tr>`,
+        ? tasks.map(taskCard).join("")
+        : `<div class="empty">暂无下载任务。去「下载」页提交第一个模型吧。</div>`,
     );
   } catch (err) {
     if (err.message === "unauthorized") {
@@ -335,29 +425,29 @@ function renderTasks(gen) {
   const pending = sessionStorage.getItem("dlmodel_flash");
   if (pending) sessionStorage.removeItem("dlmodel_flash");
   setHtml(root, `
-    <h1>下载任务</h1>
+    <div class="page-head">
+      <div>
+        <h1>下载任务</h1>
+        <p>实时查看进度、速度与剩余时间。失败任务可一键重试。</p>
+      </div>
+      <div class="actions">
+        <a href="#/download"><button class="primary" type="button">新建下载</button></a>
+      </div>
+    </div>
     <div id="task-error">${pending ? flash("ok", pending) : ""}</div>
-    <div class="panel">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>模型</th>
-            <th>状态</th>
-            <th>进度</th>
-            <th>消息</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="task-body">
-          <tr><td colspan="6" class="empty">加载中…</td></tr>
-        </tbody>
-      </table>
+    <div class="stats" id="task-stats">
+      <div class="stat"><div class="label">进行中</div><div class="value">—</div></div>
+      <div class="stat"><div class="label">排队中</div><div class="value">—</div></div>
+      <div class="stat"><div class="label">已完成</div><div class="value">—</div></div>
+      <div class="stat"><div class="label">失败</div><div class="value">—</div></div>
+    </div>
+    <div id="task-list" class="task-list">
+      <div class="empty">加载中…</div>
     </div>`);
 
-  const body = $("task-body");
-  if (body) {
-    body.addEventListener("click", async (event) => {
+  const list = $("task-list");
+  if (list) {
+    list.addEventListener("click", async (event) => {
       const btn = event.target.closest("button[data-act]");
       if (!btn || btn.disabled || !stillOn("tasks", gen)) return;
       const id = btn.getAttribute("data-id");

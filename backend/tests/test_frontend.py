@@ -16,18 +16,19 @@ def test_spa_index_served(monkeypatch, tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers.get("content-type", "")
         body = r.text
+        assert "模型下载管理" in body
+        assert 'id="app"' in body
         assert "#/download" in body
         assert "#/tasks" in body
         assert "#/library" in body
         assert "#/services" in body
         assert "#/settings" in body
-        assert "模型下载管理" in body
-        assert 'id="app"' in body
         assert "下载" in body
         assert "任务" in body
         assert "模型库" in body
         assert "设置" in body
         assert 'lang="zh-CN"' in body
+        assert "Noto+Sans+SC" in body or "IBM+Plex+Sans" in body or "Noto Sans SC" in body
         assert 'src="/app.js"' in body or 'src="app.js"' in body
 
 
@@ -44,8 +45,12 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "stillOn" in js.text
         assert "set-msg" in js.text
         assert "login-token" in js.text
+        assert "task-list" in js.text
+        assert "progress-fill" in js.text
+        assert "taskCard" in js.text
         css = client.get("/styles.css")
         assert css.status_code == 200
+        assert "progress-track" in css.text
         assert css.text.strip()
 
 
