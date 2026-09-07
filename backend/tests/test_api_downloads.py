@@ -163,16 +163,46 @@ def test_notify_webhook_settings_masked_and_validated(client):
     body = ok.json()
     assert "notify_dingtalk_webhook" not in body
     assert body["notify_dingtalk_webhook_set"] is True
+    preview = body["notify_dingtalk_webhook_preview"]
+    assert preview is not None
+    assert "oapi.dingtalk.com" in preview
+    assert "abc" not in preview
+    assert "****" in preview
     assert body["notify_on_completed"] is True
     assert body["notify_on_failed"] is False
     assert body["notify_on_started"] is True
     assert body["notify_on_cancelled"] is False
+
+    # Empty webhook fields must not wipe saved values; bools round-trip on reload.
+    reload = client.get("/api/settings", headers=headers).json()
+    assert reload["notify_dingtalk_webhook_set"] is True
+    assert reload["notify_dingtalk_webhook_preview"] == preview
+    assert reload["notify_on_started"] is True
+    keep = client.put(
+        "/api/settings",
+        headers=headers,
+        json={
+            "hf_endpoint": reload["hf_endpoint"],
+            "download_concurrency": reload["download_concurrency"],
+            "aria2_connections": reload["aria2_connections"],
+            "ollama_base_url": reload["ollama_base_url"],
+            "vllm_base_url": reload["vllm_base_url"],
+            "notify_on_completed": True,
+            "notify_on_failed": False,
+            "notify_on_started": True,
+            "notify_on_cancelled": False,
+        },
+    ).json()
+    assert keep["notify_dingtalk_webhook_set"] is True
+    assert keep["notify_dingtalk_webhook_preview"] == preview
+
     cleared = client.put(
         "/api/settings",
         headers=headers,
         json={"clear_notify_dingtalk_webhook": True},
     ).json()
     assert cleared["notify_dingtalk_webhook_set"] is False
+    assert cleared["notify_dingtalk_webhook_preview"] is None
 
 
 @respx.mock

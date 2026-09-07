@@ -48,6 +48,8 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "hf_token_set" in js.text
         assert "notify_dingtalk_webhook" in js.text
         assert "notify_on_completed" in js.text
+        assert "webhook_preview" in js.text
+        assert "secret-preview" in js.text
         assert "/api/settings/notify-test" in js.text
         assert "消息推送" in js.text
         assert "tasksRefreshGen" in js.text

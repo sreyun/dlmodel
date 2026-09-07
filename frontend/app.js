@@ -1369,23 +1369,26 @@ function renderSettings(gen) {
       </section>
       <section class="panel section-card">
         <h3>消息推送</h3>
-        <p class="lead">配置钉钉 / 飞书 / 企业微信机器人 Webhook。状态变更时推送摘要（进度、速率、预计剩余），不会按百分比刷屏；「开始下载」在测速后发送。</p>
+        <p class="lead">配置钉钉 / 飞书 / 企业微信机器人 Webhook。状态变更时推送摘要（进度、速率、预计剩余）。Webhook 保存在本地 SQLite；刷新后输入框留空表示「不修改」，下方会显示已保存的脱敏地址。</p>
         <div class="form-grid">
           <label class="field full">
             <span>钉钉机器人 Webhook（留空表示不修改）</span>
-            <input id="notify_dingtalk_webhook" type="password" autocomplete="new-password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=…">
+            <input id="notify_dingtalk_webhook" type="password" autocomplete="new-password" placeholder="粘贴新 Webhook；已保存时留空即可">
+            <span id="dingtalk_webhook_preview" class="secret-preview" hidden></span>
             <span id="dingtalk_webhook_hint" class="hint"></span>
             <label class="checkbox-row"><input type="checkbox" id="clear_notify_dingtalk_webhook"> 清除钉钉 Webhook</label>
           </label>
           <label class="field full">
             <span>飞书机器人 Webhook（留空表示不修改）</span>
-            <input id="notify_feishu_webhook" type="password" autocomplete="new-password" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
+            <input id="notify_feishu_webhook" type="password" autocomplete="new-password" placeholder="粘贴新 Webhook；已保存时留空即可">
+            <span id="feishu_webhook_preview" class="secret-preview" hidden></span>
             <span id="feishu_webhook_hint" class="hint"></span>
             <label class="checkbox-row"><input type="checkbox" id="clear_notify_feishu_webhook"> 清除飞书 Webhook</label>
           </label>
           <label class="field full">
             <span>企业微信机器人 Webhook（留空表示不修改）</span>
-            <input id="notify_wecom_webhook" type="password" autocomplete="new-password" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…">
+            <input id="notify_wecom_webhook" type="password" autocomplete="new-password" placeholder="粘贴新 Webhook；已保存时留空即可">
+            <span id="wecom_webhook_preview" class="secret-preview" hidden></span>
             <span id="wecom_webhook_hint" class="hint"></span>
             <label class="checkbox-row"><input type="checkbox" id="clear_notify_wecom_webhook"> 清除企业微信 Webhook</label>
           </label>
@@ -1423,17 +1426,47 @@ function renderSettings(gen) {
     "notify_on_cancelled",
   ];
   const webhookHints = [
-    ["dingtalk_webhook_hint", "notify_dingtalk_webhook_set", "钉钉"],
-    ["feishu_webhook_hint", "notify_feishu_webhook_set", "飞书"],
-    ["wecom_webhook_hint", "notify_wecom_webhook_set", "企业微信"],
+    [
+      "dingtalk_webhook_hint",
+      "dingtalk_webhook_preview",
+      "notify_dingtalk_webhook_set",
+      "notify_dingtalk_webhook_preview",
+      "钉钉",
+    ],
+    [
+      "feishu_webhook_hint",
+      "feishu_webhook_preview",
+      "notify_feishu_webhook_set",
+      "notify_feishu_webhook_preview",
+      "飞书",
+    ],
+    [
+      "wecom_webhook_hint",
+      "wecom_webhook_preview",
+      "notify_wecom_webhook_set",
+      "notify_wecom_webhook_preview",
+      "企业微信",
+    ],
   ];
 
   const applyWebhookHints = (data) => {
-    webhookHints.forEach(([hintId, setKey, label]) => {
+    webhookHints.forEach(([hintId, previewId, setKey, previewKey, label]) => {
       const hint = $(hintId);
+      const preview = $(previewId);
+      const configured = Boolean(data[setKey]);
+      const masked = data[previewKey];
+      if (preview) {
+        if (configured && masked) {
+          preview.hidden = false;
+          preview.textContent = `已保存：${masked}`;
+        } else {
+          preview.hidden = true;
+          preview.textContent = "";
+        }
+      }
       if (!hint) return;
-      hint.textContent = data[setKey]
-        ? `当前已配置${label} Webhook（输入新值才会覆盖）`
+      hint.textContent = configured
+        ? `当前已配置${label} Webhook（刷新后输入框留空是正常的；输入新值才会覆盖）`
         : `当前未配置${label} Webhook`;
     });
   };
@@ -1630,7 +1663,11 @@ function renderSettings(gen) {
           if (el && saved[key] != null) el.checked = Boolean(saved[key]);
         });
         settingsDirty = false;
-        showFlash("set-msg", "ok", "设置已保存");
+        showFlash(
+          "set-msg",
+          "ok",
+          "设置已保存到本地数据库；刷新后仍会保留（Webhook 以脱敏地址显示）。",
+        );
       },
       { gen, page: "settings", flashId: "set-msg" },
     );

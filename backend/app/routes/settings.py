@@ -191,6 +191,25 @@ async def effective_settings() -> dict:
     return out
 
 
+def _mask_webhook(url: str | None) -> str | None:
+    """Return a non-secret preview so the UI can show that a webhook is saved."""
+    raw = optional_secret(url)
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return "****（已保存）"
+    parts = [p for p in (parsed.path or "").split("/") if p]
+    if parts:
+        last = parts[-1]
+        parts[-1] = ("****" + last[-4:]) if len(last) > 4 else "****"
+        path = "/" + "/".join(parts)
+    else:
+        path = ""
+    query = "?****" if parsed.query else ""
+    return f"{parsed.scheme}://{parsed.netloc}{path}{query}"
+
+
 def public_settings(merged: dict) -> dict:
     return {
         "hf_endpoint": merged["hf_endpoint"],
@@ -203,6 +222,13 @@ def public_settings(merged: dict) -> dict:
         "notify_dingtalk_webhook_set": bool(merged.get("notify_dingtalk_webhook")),
         "notify_feishu_webhook_set": bool(merged.get("notify_feishu_webhook")),
         "notify_wecom_webhook_set": bool(merged.get("notify_wecom_webhook")),
+        "notify_dingtalk_webhook_preview": _mask_webhook(
+            merged.get("notify_dingtalk_webhook")
+        ),
+        "notify_feishu_webhook_preview": _mask_webhook(
+            merged.get("notify_feishu_webhook")
+        ),
+        "notify_wecom_webhook_preview": _mask_webhook(merged.get("notify_wecom_webhook")),
         "notify_on_completed": bool(merged.get("notify_on_completed", True)),
         "notify_on_failed": bool(merged.get("notify_on_failed", True)),
         "notify_on_started": bool(merged.get("notify_on_started", False)),
