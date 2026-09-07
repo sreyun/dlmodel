@@ -9,6 +9,7 @@ from app.queue import DownloadQueue
 from app.routes.auth import router as auth_router
 from app.routes.downloads import router as downloads_router
 from app.routes.models import router as models_router
+from app.routes.services import router as services_router
 from app.routes.settings import apply_sqlite_overrides, router as settings_router
 
 
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(downloads_router)
     app.include_router(models_router)
+    app.include_router(services_router)
     return app
 
 
