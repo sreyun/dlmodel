@@ -1,154 +1,169 @@
 # dlmodel
 
-Download Hugging Face and ModelScope models into host volumes, with a small web UI and an aria2 sidecar. Optional Compose profiles attach Ollama or vLLM to the same model roots.
+面向国内网络的模型下载与管理工具：Web UI + FastAPI + aria2，支持从 **ModelScope / Hugging Face（镜像）/ Ollama** 拉取权重，落盘到 **vLLM 布局** 或 **Ollama**；任务与设置持久化到 SQLite，可选钉钉 / 飞书 / 企业微信推送。
 
-## Quick start (development)
+| | |
+|--|--|
+| 开发入口 | [http://127.0.0.1:8080](http://127.0.0.1:8080)（compose 默认只绑本机） |
+| 生产镜像 | `swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest` |
+| 鉴权 | `.env` 中的 `ADMIN_TOKEN`（Bearer） |
 
-1. Copy the example env file and set a real admin token:
+## 功能概览
 
-   ```bash
-   cp .env.example .env
-   ```
+- **下载**：自动源（优先魔搭，回落 HF 镜像）、指定 ModelScope / HF / Ollama；队列并发、进度 / 速率 / ETA
+- **落盘**：HF / vLLM → `{MODEL_ROOT}/hf/<org>/<repo>/`；Ollama → `{MODEL_ROOT}/ollama`
+- **持久化**：SQLite（`{DATA_DIR}/app.db`）；优雅重启时进行中的任务会 **停放并恢复**，不会被取消
+- **设置**：HF / ModelScope Token、并发与镜像地址；消息推送 Webhook（脱敏回显，明文不回传）
+- **可选推理**：Compose profile 挂载同目录的 Ollama / vLLM（默认不启动）
 
-   Edit `.env` and change `ADMIN_TOKEN` from `change-me-to-a-long-random-string` to a long random secret.
-
-2. Build and start the **dev** stack (`web` + `aria2`, image built locally):
-
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-   ```
-
-3. Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with `ADMIN_TOKEN`.
-
-## Production (Huawei SWR image)
-
-CI builds and pushes `swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel` on every `v*` tag.
+## 快速开始（开发）
 
 ```bash
-cp .env.example .env   # set a strong ADMIN_TOKEN; do NOT enable ALLOW_INSECURE_ADMIN
+cp .env.example .env
+# 将 ADMIN_TOKEN 改成足够长的随机串
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，用 `ADMIN_TOKEN` 登录。
+
+开发 overlay 会本地构建 `dlmodel:dev`，并将 Web 端口绑到 `127.0.0.1`；可用 `ALLOW_INSECURE_ADMIN=1` 方便短 Token（**勿用于公网**）。
+
+## 生产部署（华为云 SWR）
+
+每个 `v*` 标签会触发 GitHub Actions，推送镜像：
+
+- `swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel:<tag>`
+- `…/dlmodel:latest`（滚动更新推荐）
+
+```bash
+cp .env.example .env          # 设置强 ADMIN_TOKEN；不要开 ALLOW_INSECURE_ADMIN
 export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
 docker login swr.cn-east-3.myhuaweicloud.com
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-CI also pushes version tags (`v0.3.2`, …). Pin those instead of `latest` when you need a fixed rollback target.
+需要可回滚时改用版本号，例如 `:v0.3.2`。`pull_policy: always` 会在每次 `up` 时拉取最新镜像。
 
-Optional Compose convenience:
+也可写入 `.env`：
 
 ```bash
-# .env
 COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
 DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
 ```
 
-### CI secrets / variables
+### 发布与 CI
 
-Repository **Actions secrets** (already used by workflow):
+仓库 Secrets：`HW_ACCESS_KEY`、`HW_SECRET_KEY`。可选 Variable / Secret：`HW_SWR_NAMESPACE`（默认 `sreyun`）。
 
-| Secret | Purpose |
-|--------|---------|
-| `HW_ACCESS_KEY` | Huawei IAM Access Key Id (AK) |
-| `HW_SECRET_KEY` | Huawei IAM Secret Access Key (SK) |
-
-Optional:
-
-| Name | Where | Purpose |
-|------|-------|---------|
-| `HW_SWR_NAMESPACE` | Actions **variable** (preferred) or secret | SWR organization name (default `sreyun`) |
-
-Create the organization once in [SWR console](https://console.huaweicloud.com/swr) (region **华东-上海一 / cn-east-3**) so the first push can create the `dlmodel` repository.
-
-Tag release flow:
+请先在 [SWR 控制台](https://console.huaweicloud.com/swr)（**华东-上海一 / cn-east-3**）创建组织，以便首次推送创建 `dlmodel` 仓库。
 
 ```bash
 git tag -a v0.3.2 -m "v0.3.2"
 git push origin v0.3.2
-# → GitHub Action "Build and push Huawei SWR" runs automatically
-# → pushes both :v0.3.2 and :latest
+# → 自动构建并推送 :v0.3.2 与 :latest
 ```
 
-Manual rebuild: Actions → **Build and push Huawei SWR** → Run workflow.
+手动重跑：Actions → **Build and push Huawei SWR** → Run workflow。
 
-## China defaults
+## 国内默认
 
-The example env is oriented toward mainland China networks:
+`.env.example` 面向大陆网络：
 
-- `HF_ENDPOINT=https://hf-mirror.com` — Hugging Face Hub traffic goes through the mirror.
-- Source `auto` tries ModelScope first, then Hugging Face.
-- Downloads use aria2 (`ARIA2_RPC_URL=http://aria2:6800/jsonrpc`) with HTTP Range resume + SSL retries if RPC is down or fails.
-- Transient TLS errors (common on mirrors) are retried via `DOWNLOAD_RETRIES` (default `3`).
+| 项 | 说明 |
+|----|------|
+| `HF_ENDPOINT=https://hf-mirror.com` | HF Hub 走镜像 |
+| 源 `auto` | 先 ModelScope，再 HF |
+| aria2 | `ARIA2_RPC_URL=http://aria2:6800/jsonrpc`；RPC 失败时回退 HTTP Range + SSL 重试 |
+| `DOWNLOAD_RETRIES` | 瞬时 TLS / 网络错误额外重试（默认 `3`） |
 
-Set `HF_TOKEN` and/or `MODELSCOPE_API_TOKEN` in `.env` for gated or higher-rate pulls. Tokens can also be saved later in the Settings page (SQLite under `DATA_DIR`; UI values override env for merge keys).
+门禁或提速可在 `.env` 或设置页配置 `HF_TOKEN` / `MODELSCOPE_API_TOKEN`（UI 写入 SQLite，优先于环境变量中的同名合并项）。
 
-## Persistence
+## 数据与目录
 
-Tasks and settings live in SQLite at `{DATA_DIR}/app.db` (compose: `./data/app`). Model files live under `{MODEL_ROOT}` (compose: `./data/models`). On graceful restart, in-flight downloads are **parked** and resumed on next start — they are not cancelled. Delete task records only from the UI (or by removing those data dirs).
+| 主机路径 | 容器路径 | 用途 |
+|----------|----------|------|
+| `./data/models` | `/models`（`MODEL_ROOT`） | 模型权重 |
+| `./data/app` | `/data`（`DATA_DIR`） | SQLite `app.db`、设置 |
+| `./data/aria2` | `/config` | aria2 配置 |
 
-## Robot notifications
+`web` 与 `aria2` 共享模型目录。默认 `PUID=0` / `PGID=0`，保证 aria2 可写同一卷；若宿主机目录权限过严，需保证容器用户可写，否则会退化为单流 HTTP。
 
-Settings → 消息推送 supports DingTalk / Feishu / WeCom group robots (HTTPS webhook URLs only). Default events: download completed / failed. Optional: started / cancelled. Started messages include progress, rate, and ETA after first measurable transfer. You can also set `NOTIFY_*` in `.env`; prefer saving in the UI.
+磁盘布局：
 
-## Model roots
+- vLLM / HF：`{MODEL_ROOT}/hf/<org>/<repo>/`
+- Ollama（profile）：主机 `./data/models/ollama` → 容器 `/root/.ollama`
 
-Bind mounts (created on first start):
+任务记录请在 UI 删除，或自行清理上述数据目录。
 
-| Host path | Container | Use |
-|-----------|-----------|-----|
-| `./data/models` | `/models` (`MODEL_ROOT`) | All downloaded weights |
-| `./data/app` | `/data` (`DATA_DIR`) | SQLite and app state |
-| `./data/aria2` | `/config` | aria2 config |
+## 消息推送
 
-`web` and `aria2` share `./data/models`. The default stack runs aria2 as root (`PUID=0` / `PGID=0`) so it can write the same files as `web`. If you bind-mount a host directory with restrictive ownership, make `./data/models` writable by the container user (root in the default compose) or downloads fall back to single-stream HTTP.
+设置 → **消息推送**：钉钉 / 飞书 / 企业微信群机器人（仅 HTTPS Webhook，主机白名单校验）。
 
-On-disk layout:
+- 默认：下载完成、失败
+- 可选：开始下载、任务取消（「开始」在出现可测速进度后再发，含进度 / 速率 / ETA）
+- 刷新后输入框留空表示「不修改」；页面展示脱敏地址表示已保存
+- 也可用环境变量 `NOTIFY_*`；更推荐在 UI 保存
 
-- vLLM / Hugging Face: `{MODEL_ROOT}/hf/<org>/<repo>/`
-- Ollama (compose profile): host `./data/models/ollama` → container `/root/.ollama`
+## 可选推理 Profile
 
-## Optional inference profiles
-
-Ollama and vLLM are **not** started by default. Management and downloads work without them.
+管理与下载不依赖推理服务；需要时再启：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile ollama up -d --build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile vllm up -d --build
 ```
 
-- **Ollama** (`--profile ollama`) — API at `http://127.0.0.1:11434`. The web service uses `OLLAMA_BASE_URL=http://ollama:11434`.
-- **vLLM** (`--profile vllm`) — OpenAI-compatible API at `http://127.0.0.1:8000`.
+| Profile | 本机 API | 说明 |
+|---------|----------|------|
+| `ollama` | `http://127.0.0.1:11434` | Web 使用 `OLLAMA_BASE_URL=http://ollama:11434` |
+| `vllm` | `http://127.0.0.1:8000` | OpenAI 兼容；需 NVIDIA Container Toolkit |
 
-vLLM notes:
+vLLM 注意：
 
-- The compose service uses `runtime: nvidia` and `vllm/vllm-openai:latest`. Adjust the image, runtime, or device requests for your GPU host (NVIDIA Container Toolkit, or a CPU/other image if you are not on NVIDIA).
-- `VLLM_MODEL` must be a **concrete downloaded repo path** (for example `/models/hf/org/repo`), not the `/models/hf` root. Set it in `.env` after a download finishes, then recreate the `vllm` service.
-- `HUGGING_FACE_HUB_TOKEN` is passed from `HF_TOKEN` if the engine still needs Hub access.
+- 镜像默认 `vllm/vllm-openai:latest` + `runtime: nvidia`，可按主机改镜像 / 设备
+- `VLLM_MODEL` 必须是**已下载的具体仓库路径**（如 `/models/hf/org/repo`），不能是 `/models/hf` 根目录；下载完成后再写入 `.env` 并 recreate `vllm`
+- `HUGGING_FACE_HUB_TOKEN` 由 `HF_TOKEN` 传入（引擎仍需拉 Hub 时）
 
-## Configuration
+## 配置参考
 
-See `.env.example`. Important variables:
+详见 `.env.example`。常用变量：
 
-| Variable | Purpose |
-|----------|---------|
-| `ADMIN_TOKEN` | Bearer token for the UI and `/api` |
-| `MODEL_ROOT` / `DATA_DIR` | Model and SQLite volumes |
-| `DLMODEL_IMAGE` | Production web image (`:latest` recommended; pin `:vX.Y.Z` for rollback) |
-| `HF_ENDPOINT` / `HF_TOKEN` | Hugging Face mirror and token |
-| `MODELSCOPE_API_TOKEN` | ModelScope token |
-| `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | aria2 JSON-RPC (secret must match the `aria2` service) |
-| `DOWNLOAD_CONCURRENCY` / `ARIA2_CONNECTIONS` | Parallel tasks / aria2 per-file connections |
-| `DOWNLOAD_RETRIES` | Extra retries for transient SSL/network errors |
-| `NOTIFY_*` | Group robot webhooks / event toggles |
-| `OLLAMA_BASE_URL` / `VLLM_BASE_URL` | Inference endpoints when profiles (or remote servers) are used |
-| `VLLM_MODEL` | Model path for the optional `vllm` service |
+| 变量 | 说明 |
+|------|------|
+| `ADMIN_TOKEN` | UI / API Bearer |
+| `MODEL_ROOT` / `DATA_DIR` | 模型与 SQLite |
+| `DLMODEL_IMAGE` | 生产镜像（推荐 `:latest`，回滚钉 `:vX.Y.Z`） |
+| `HF_ENDPOINT` / `HF_TOKEN` | HF 镜像与 Token |
+| `MODELSCOPE_API_TOKEN` | 魔搭 Token |
+| `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | 须与 `aria2` 服务一致 |
+| `DOWNLOAD_CONCURRENCY` / `ARIA2_CONNECTIONS` | 任务并发 / 单文件连接数 |
+| `DOWNLOAD_RETRIES` | SSL / 网络瞬时错误重试 |
+| `NOTIFY_*` | 群机器人 Webhook 与事件开关 |
+| `OLLAMA_BASE_URL` / `VLLM_BASE_URL` | 推理地址（profile 或远程） |
+| `VLLM_MODEL` | 可选 `vllm` 服务的模型路径 |
 
-## Local run (no Docker)
+## 本地运行（不用 Docker）
 
 ```bash
 cp .env.example .env
 cd backend
 pip install -e ".[dev]"
-# point MODEL_ROOT / DATA_DIR / ARIA2_RPC_URL at local paths
+# 将 MODEL_ROOT / DATA_DIR / ARIA2_RPC_URL 指到本机路径
 uvicorn app.main:app --reload --port 8080
 ```
 
-The API serves `frontend/` from the repo root (`backend/app/main.py` → `../frontend`). In Docker the image copies that tree to `/frontend` and sets `FRONTEND_DIR=/frontend` so StaticFiles still finds it after `pip install`.
+API 从仓库根目录的 `frontend/` 提供静态页（`backend/app/main.py` → `../frontend`）。Docker 镜像将前端拷到 `/frontend`，并设置 `FRONTEND_DIR=/frontend`。
+
+测试：
+
+```bash
+cd backend && python -m pytest tests/ -q
+```
+
+## Compose 文件一览
+
+| 文件 | 用途 |
+|------|------|
+| `docker-compose.yml` | 基础栈（web + aria2 + 可选 profile） |
+| `docker-compose.dev.yml` | 本地构建、本机绑定、宽松管理 Token |
+| `docker-compose.prod.yml` | 拉取 SWR 镜像、健康检查、日志轮转、可对外端口 |
