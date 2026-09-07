@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.aria2_client import Aria2Client
 from app.config import get_settings
-from app.db import get_task, insert_task, update_task
+from app.db import get_task, insert_task, list_tasks, update_task
 from app.downloaders import (
     download_hf,
     download_modelscope,
@@ -14,6 +14,8 @@ from app.downloaders import (
 from app.models_schema import DownloadCreate
 from app.paths import hf_model_dir, ollama_root
 from app.source_resolve import resolve_source
+
+_TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
 
 class _GidTrackingAria2:
@@ -60,6 +62,14 @@ class DownloadQueue:
 
     async def stop(self) -> None:
         self._started = False
+        for row in await list_tasks():
+            if row["status"] not in ("queued", "running"):
+                continue
+            flag = self._cancel_flags.setdefault(row["id"], asyncio.Event())
+            flag.set()
+            await self._remove_aria2_gids(row["id"])
+            await update_task(row["id"], status="cancelled", message="queue stopped")
+            await self._publish(row["id"])
         for worker in self._workers:
             worker.cancel()
         if self._workers:
@@ -104,9 +114,8 @@ class DownloadQueue:
         if row is None:
             return
         if row["status"] in ("queued", "running"):
-            if row["status"] == "queued":
-                await update_task(task_id, status="cancelled", message="Cancelled")
-                await self._publish(task_id)
+            await update_task(task_id, status="cancelled", message="Cancelled")
+            await self._publish(task_id)
 
     async def retry(self, task_id: str) -> None:
         row = await get_task(task_id)
@@ -129,8 +138,22 @@ class DownloadQueue:
         self._subscribers.setdefault(task_id, []).append(q)
         return q
 
+    def unsubscribe(self, task_id: str, queue: asyncio.Queue | None = None) -> None:
+        subs = self._subscribers.get(task_id)
+        if not subs:
+            return
+        if queue is None:
+            self._subscribers.pop(task_id, None)
+            return
+        try:
+            subs.remove(queue)
+        except ValueError:
+            return
+        if not subs:
+            self._subscribers.pop(task_id, None)
+
     async def _worker(self) -> None:
-        while True:
+        while self._started:
             task_id = await self._pending.get()
             try:
                 await self._process(task_id)
@@ -138,8 +161,9 @@ class DownloadQueue:
                 raise
             except Exception as exc:
                 try:
-                    await update_task(task_id, status="failed", message=str(exc))
-                    await self._publish(task_id)
+                    await self._finish_if_active(
+                        task_id, status="failed", message=str(exc)
+                    )
                 except Exception:
                     pass
             finally:
@@ -151,15 +175,19 @@ class DownloadQueue:
             return
 
         cancelled = self._cancel_flags.setdefault(task_id, asyncio.Event())
-        if cancelled.is_set() or row["status"] == "cancelled":
-            if row["status"] != "cancelled":
-                await update_task(task_id, status="cancelled", message="Cancelled")
-                await self._publish(task_id)
+        if cancelled.is_set() or row["status"] in _TERMINAL:
+            await self._finish_if_active(
+                task_id, status="cancelled", message="Cancelled"
+            )
             return
 
         await update_task(task_id, status="running")
         row = await get_task(task_id)
         await self._publish(task_id)
+        if cancelled.is_set():
+            await update_task(task_id, status="cancelled", message="Cancelled")
+            await self._publish(task_id)
+            return
 
         async def on_progress(
             progress_bytes: int,
@@ -178,27 +206,30 @@ class DownloadQueue:
             await self._publish(task_id)
 
         async def on_log(message: str) -> None:
+            if cancelled.is_set():
+                return
             await update_task(task_id, message=message)
             await self._publish(task_id)
 
         try:
+            if cancelled.is_set():
+                await self._finish_if_active(task_id, status="cancelled", message="Cancelled")
+                return
             await self._run_download(row, on_progress, on_log, cancelled)
         except asyncio.CancelledError:
             if cancelled.is_set():
-                await update_task(task_id, status="cancelled", message="Cancelled")
-                await self._publish(task_id)
-                return
+                await self._finish_if_active(
+                    task_id, status="cancelled", message="Cancelled"
+                )
             raise
         except Exception as exc:
-            await update_task(task_id, status="failed", message=str(exc))
-            await self._publish(task_id)
+            await self._finish_if_active(task_id, status="failed", message=str(exc))
             return
 
         if cancelled.is_set():
-            await update_task(task_id, status="cancelled", message="Cancelled")
-        else:
-            await update_task(task_id, status="completed", speed_bps=0)
-        await self._publish(task_id)
+            await self._finish_if_active(task_id, status="cancelled", message="Cancelled")
+            return
+        await self._finish_if_active(task_id, status="completed", speed_bps=0)
 
     async def _run_download(self, task, on_progress, on_log, cancelled) -> None:
         settings = get_settings()
@@ -293,12 +324,16 @@ class DownloadQueue:
             return
         for gid in list(self._task_gids.get(task_id, [])):
             try:
-                await self._aria2._call(
-                    "aria2.forceRemove",
-                    self._aria2._auth_params(gid),
-                )
+                await self._aria2.force_remove(gid)
             except Exception:
                 pass
+
+    async def _finish_if_active(self, task_id: str, *, status: str, **fields) -> None:
+        row = await get_task(task_id)
+        if row is None or row["status"] in _TERMINAL:
+            return
+        await update_task(task_id, status=status, **fields)
+        await self._publish(task_id)
 
     async def _publish(self, task_id: str) -> None:
         row = await get_task(task_id)
@@ -311,5 +346,7 @@ class DownloadQueue:
             "status": row["status"],
             "message": row["message"],
         }
-        for q in self._subscribers.get(task_id, []):
+        for q in list(self._subscribers.get(task_id, [])):
             await q.put(event)
+        if event["status"] in _TERMINAL:
+            self._subscribers.pop(task_id, None)

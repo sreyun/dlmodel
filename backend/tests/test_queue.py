@@ -148,3 +148,99 @@ async def test_unknown_model_fails(tmp_path, monkeypatch):
     await q.stop()
     assert row["status"] == "failed"
     assert row["message"].startswith("Model not found on attempted sources:")
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_updates_status_promptly(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    started = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        started.set()
+        await cancelled.wait()
+        # Stay in-flight so cancel() itself must write DB status.
+        await asyncio.Event().wait()
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(DownloadCreate(name="org/m", source="huggingface", target="vllm"))
+    await started.wait()
+    assert (await get_task(tid))["status"] == "running"
+    await q.cancel(tid)
+    row = await get_task(tid)
+    assert row["status"] == "cancelled"
+    await _wait_status(tid, "cancelled")
+    await q.stop()
+    assert (await get_task(tid))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_marks_queued_and_running(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    started = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        started.set()
+        await cancelled.wait()
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    running_id = await q.enqueue(
+        DownloadCreate(name="org/a", source="huggingface", target="vllm")
+    )
+    await started.wait()
+    queued_id = await q.enqueue(
+        DownloadCreate(name="org/b", source="huggingface", target="vllm")
+    )
+    await q.stop()
+    running = await get_task(running_id)
+    queued = await get_task(queued_id)
+    assert running["status"] in ("cancelled", "failed")
+    assert queued["status"] in ("cancelled", "failed")
+    assert "queue stopped" in running["message"]
+    assert "queue stopped" in queued["message"]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_pruned_after_terminal(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(100, 100, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(DownloadCreate(name="org/m", source="huggingface", target="vllm"))
+    sub = q.subscribe(tid)
+    await _wait_status(tid, "completed", "failed")
+    q.unsubscribe(tid, sub)
+    await q.stop()
+    assert tid not in q._subscribers
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_before_terminal(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    gate = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await gate.wait()
+        await on_progress(100, 100, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(DownloadCreate(name="org/m", source="huggingface", target="vllm"))
+    sub = q.subscribe(tid)
+    q.unsubscribe(tid, sub)
+    assert sub not in q._subscribers.get(tid, [])
+    gate.set()
+    await _wait_status(tid, "completed", "failed")
+    await q.stop()

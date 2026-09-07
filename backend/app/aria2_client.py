@@ -74,3 +74,6 @@ class Aria2Client:
             "total_length": int(result["totalLength"]),
             "download_speed": int(result["downloadSpeed"]),
         }
+
+    async def force_remove(self, gid: str) -> None:
+        await self._call("aria2.forceRemove", self._auth_params(gid))
