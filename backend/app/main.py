@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,22 +18,45 @@ from app.routes.settings import apply_sqlite_overrides, router as settings_route
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR") or (_REPO_ROOT / "frontend"))
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_logging()
     assert_admin_token_safe()
     settings = get_settings()
-    await init_db(str(Path(settings.data_dir) / "app.db"))
+    data_dir = Path(settings.data_dir)
+    model_root = Path(settings.model_root)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    model_root.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "app.db"
+    await init_db(str(db_path))
     await apply_sqlite_overrides()
     settings = get_settings()
     queue = DownloadQueue(concurrency=settings.download_concurrency)
     app.state.queue = queue
     await queue.start()
+    logger.info(
+        "dlmodel ready data_dir=%s model_root=%s db=%s",
+        data_dir,
+        model_root,
+        db_path,
+    )
     try:
         yield
     finally:
         await queue.stop()
+        logger.info("dlmodel shutdown complete")
 
 
 def create_app() -> FastAPI:

@@ -26,10 +26,25 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     vllm_base_url: str = "http://vllm:8000"
     vllm_model: str | None = None
+    notify_dingtalk_webhook: str | None = None
+    notify_feishu_webhook: str | None = None
+    notify_wecom_webhook: str | None = None
+    notify_on_completed: bool = True
+    notify_on_failed: bool = True
+    notify_on_started: bool = False
+    notify_on_cancelled: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
 
-    @field_validator("hf_token", "modelscope_api_token", "vllm_model", mode="before")
+    @field_validator(
+        "hf_token",
+        "modelscope_api_token",
+        "vllm_model",
+        "notify_dingtalk_webhook",
+        "notify_feishu_webhook",
+        "notify_wecom_webhook",
+        mode="before",
+    )
     @classmethod
     def _blank_optional_to_none(cls, value):
         if value is None or isinstance(value, str):

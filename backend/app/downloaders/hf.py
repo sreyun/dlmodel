@@ -5,7 +5,7 @@ from huggingface_hub import HfApi, hf_hub_url
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from app.aria2_client import Aria2Client
-from app.config import optional_secret
+from app.config import get_settings, optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
 from app.downloaders.sdk_fallback import http_download
 from app.paths import safe_path_under
@@ -46,6 +46,9 @@ async def _download_with_aria2(
     aria2: Aria2Client,
     connections: int,
     on_progress: ProgressCallback,
+    *,
+    headers: list[str] | None = None,
+    max_tries: int = 5,
 ) -> None:
     file_dest.parent.mkdir(parents=True, exist_ok=True)
     gid = await aria2.add_uri(
@@ -53,6 +56,8 @@ async def _download_with_aria2(
         out_dir=str(file_dest.parent),
         out_name=file_dest.name,
         connections=connections,
+        headers=headers,
+        max_tries=max_tries,
     )
     while True:
         status = await aria2.tell_status(gid)
@@ -69,7 +74,8 @@ async def _download_with_aria2(
         if status["status"] == "removed":
             raise DownloadRemoved("aria2 下载已被移除")
         if status["status"] == "error":
-            raise RuntimeError("aria2 返回异常状态：error")
+            detail = status.get("error_message") or "error"
+            raise RuntimeError(f"aria2 下载失败：{detail}")
         await asyncio.sleep(1)
 
 
@@ -84,6 +90,7 @@ async def _download_hf_file(
     connections: int,
     on_progress: ProgressCallback,
     on_log: LogCallback,
+    retries: int,
 ) -> None:
     url = _hf_download_url(name, filename, revision, endpoint)
     file_dest = safe_path_under(Path(dest), filename)
@@ -91,28 +98,45 @@ async def _download_hf_file(
 
     token = optional_secret(token)
     auth_headers = {"Authorization": f"Bearer {token}"} if token else None
+    aria2_headers = [f"Authorization: Bearer {token}"] if token else None
 
-    if token:
-        await on_log("已使用 HF Token，走鉴权 HTTP 下载")
-        await http_download(
-            url, file_dest, on_progress=on_progress, headers=auth_headers
-        )
-    elif aria2 and await aria2.is_available():
+    if aria2 and await aria2.is_available():
         try:
+            if token:
+                await on_log("使用 aria2（带 HF Token）加速下载")
             await _download_with_aria2(
-                url, file_dest, aria2, connections, on_progress
+                url,
+                file_dest,
+                aria2,
+                connections,
+                on_progress,
+                headers=aria2_headers,
+                max_tries=max(1, retries + 1),
             )
             return
         except DownloadRemoved:
             raise
         except Exception as exc:
-            await on_log(
-                f"aria2 下载 {filename} 失败：{exc}；回退到 HTTP"
+            await on_log(f"aria2 下载 {filename} 失败：{exc}；回退到 HTTP 断点续传")
+            await http_download(
+                url,
+                file_dest,
+                on_progress=on_progress,
+                headers=auth_headers,
+                retries=retries,
+                on_log=on_log,
             )
-            await http_download(url, file_dest, on_progress=on_progress)
-    else:
-        await on_log("aria2 不可用；使用 SDK HTTP 回退下载")
-        await http_download(url, file_dest, on_progress=on_progress)
+            return
+
+    await on_log("aria2 不可用；使用 HTTP 断点续传下载")
+    await http_download(
+        url,
+        file_dest,
+        on_progress=on_progress,
+        headers=auth_headers,
+        retries=retries,
+        on_log=on_log,
+    )
 
 
 async def _repo_file_sizes(
@@ -148,8 +172,11 @@ async def download_hf(
     connections: int,
     on_progress: ProgressCallback,
     on_log: LogCallback,
+    retries: int | None = None,
 ) -> None:
     token = optional_secret(token)
+    if retries is None:
+        retries = max(0, int(get_settings().download_retries))
     api = HfApi(endpoint=endpoint, token=token)
     files = await asyncio.to_thread(
         api.list_repo_files, repo_id=name, revision=revision, repo_type="model"
@@ -164,6 +191,19 @@ async def download_hf(
     completed_before = 0
 
     for index, filename in enumerate(files, start=1):
+        file_path = safe_path_under(Path(dest), filename)
+        expected = sizes.get(filename)
+        if (
+            expected is not None
+            and file_path.exists()
+            and file_path.is_file()
+            and file_path.stat().st_size == expected
+        ):
+            await on_log(f"({index}/{len(files)}) 已存在，跳过 {filename}")
+            completed_before += expected
+            await on_progress(completed_before, total_known, 0.0)
+            continue
+
         await on_log(f"({index}/{len(files)}) 正在下载 {filename}")
 
         async def file_progress(done: int, total: int | None, speed: float | None) -> None:
@@ -184,8 +224,8 @@ async def download_hf(
             connections,
             file_progress,
             on_log,
+            retries,
         )
-        file_path = safe_path_under(Path(dest), filename)
         if filename in sizes:
             completed_before += sizes[filename]
         elif file_path.exists():

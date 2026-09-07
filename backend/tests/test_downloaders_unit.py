@@ -201,6 +201,52 @@ async def test_download_hf_token_uses_authenticated_http():
 
 
 @pytest.mark.asyncio
+async def test_download_hf_token_prefers_aria2_with_auth_header():
+    aria2 = MagicMock()
+    aria2.is_available = AsyncMock(return_value=True)
+    aria2.add_uri = AsyncMock(return_value="gid-1")
+    aria2.tell_status = AsyncMock(
+        return_value={
+            "status": "complete",
+            "completed_length": 10,
+            "total_length": 10,
+            "download_speed": 0,
+            "error_message": "",
+        }
+    )
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/file.bin"),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock) as http_mock,
+        patch("app.downloaders.hf.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(return_value=["file.bin"])
+
+        async def on_progress(d, t, s):
+            pass
+
+        async def on_log(m):
+            pass
+
+        await download_hf(
+            "org/model",
+            Path("/tmp/dest"),
+            endpoint="https://hf.co",
+            token="secret-token",
+            revision="main",
+            aria2=aria2,
+            connections=4,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+        http_mock.assert_not_awaited()
+        aria2.add_uri.assert_awaited_once()
+        kwargs = aria2.add_uri.await_args.kwargs
+        assert kwargs["headers"] == ["Authorization: Bearer secret-token"]
+
+
+@pytest.mark.asyncio
 async def test_download_hf_blank_token_skips_auth_header():
     with (
         patch("app.downloaders.hf.HfApi") as MockApi,
@@ -328,3 +374,52 @@ async def test_download_modelscope_polls_progress_while_running(tmp_path):
 
     assert len(progresses) >= 2
     assert max(progresses) >= 4096
+
+
+@pytest.mark.asyncio
+async def test_download_modelscope_retries_transient_then_succeeds(tmp_path):
+    dest = tmp_path / "dest"
+    calls = {"n": 0}
+    logs: list[str] = []
+
+    def fake_snapshot_download(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ConnectionError(
+                "SSL: UNEXPECTED_EOF_WHILE_READING"
+            )
+        local = Path(kwargs["local_dir"])
+        local.mkdir(parents=True, exist_ok=True)
+        (local / "ok.bin").write_bytes(b"z" * 128)
+        return str(local)
+
+    with (
+        patch(
+            "app.downloaders.modelscope.snapshot_download",
+            side_effect=fake_snapshot_download,
+        ),
+        patch(
+            "app.downloaders.modelscope.retry_backoff_seconds",
+            return_value=0,
+        ),
+    ):
+
+        async def on_progress(d, t, s):
+            pass
+
+        async def on_log(m):
+            logs.append(m)
+
+        await download_modelscope(
+            "damo/model",
+            dest,
+            token=None,
+            revision=None,
+            on_progress=on_progress,
+            on_log=on_log,
+            retries=2,
+        )
+
+    assert calls["n"] == 2
+    assert any("重试" in m for m in logs)
+    assert (dest / "ok.bin").exists()

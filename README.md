@@ -10,7 +10,7 @@ Download Hugging Face and ModelScope models into host volumes, with a small web 
    cp .env.example .env
    ```
 
-   Edit `.env` and change `ADMIN_TOKEN` from `changeme`.
+   Edit `.env` and change `ADMIN_TOKEN` from `change-me-to-a-long-random-string` to a long random secret.
 
 2. Build and start the default stack (`web` + `aria2`):
 
@@ -26,9 +26,18 @@ The example env is oriented toward mainland China networks:
 
 - `HF_ENDPOINT=https://hf-mirror.com` — Hugging Face Hub traffic goes through the mirror.
 - Source `auto` tries ModelScope first, then Hugging Face.
-- Downloads use aria2 (`ARIA2_RPC_URL=http://aria2:6800/jsonrpc`) with SDK single-stream fallback if RPC is down.
+- Downloads use aria2 (`ARIA2_RPC_URL=http://aria2:6800/jsonrpc`) with HTTP Range resume + SSL retries if RPC is down or fails.
+- Transient TLS errors (common on mirrors) are retried via `DOWNLOAD_RETRIES` (default `3`).
 
-Set `HF_TOKEN` and/or `MODELSCOPE_API_TOKEN` in `.env` for gated or higher-rate pulls. Tokens can also be saved later in the Settings page.
+Set `HF_TOKEN` and/or `MODELSCOPE_API_TOKEN` in `.env` for gated or higher-rate pulls. Tokens can also be saved later in the Settings page (SQLite under `DATA_DIR`; UI values override env for merge keys).
+
+## Persistence
+
+Tasks and settings live in SQLite at `{DATA_DIR}/app.db` (compose: `./data/app`). Model files live under `{MODEL_ROOT}` (compose: `./data/models`). On graceful restart, in-flight downloads are **parked** and resumed on next start — they are not cancelled. Delete task records only from the UI (or by removing those data dirs).
+
+## Robot notifications
+
+Settings → 消息推送 supports DingTalk / Feishu / WeCom group robots (HTTPS webhook URLs only). Default events: download completed / failed. Optional: started / cancelled. You can also set `NOTIFY_*` in `.env`; prefer saving in the UI.
 
 ## Model roots
 
@@ -77,6 +86,10 @@ See `.env.example`. Important variables:
 | `HF_ENDPOINT` / `HF_TOKEN` | Hugging Face mirror and token |
 | `MODELSCOPE_API_TOKEN` | ModelScope token |
 | `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | aria2 JSON-RPC (secret must match the `aria2` service) |
+| `DOWNLOAD_CONCURRENCY` / `ARIA2_CONNECTIONS` | Parallel tasks / aria2 per-file connections |
+| `DOWNLOAD_RETRIES` | Extra retries for transient SSL/network errors |
+| `NOTIFY_DINGTALK_WEBHOOK` / `NOTIFY_FEISHU_WEBHOOK` / `NOTIFY_WECOM_WEBHOOK` | Group robot webhooks (optional; UI preferred) |
+| `NOTIFY_ON_COMPLETED` / `NOTIFY_ON_FAILED` / `NOTIFY_ON_STARTED` / `NOTIFY_ON_CANCELLED` | Event toggles (`1`/`0`) |
 | `OLLAMA_BASE_URL` / `VLLM_BASE_URL` | Inference endpoints when profiles (or remote servers) are used |
 | `VLLM_MODEL` | Model path for the optional `vllm` service |
 

@@ -2,6 +2,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
+import respx
+from httpx import Response
 
 from app.db import get_task, init_db, set_setting
 from app.models_schema import DownloadCreate
@@ -208,7 +210,7 @@ async def test_cancel_running_updates_status_promptly(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_marks_queued_and_running(tmp_path, monkeypatch):
+async def test_stop_parks_queued_and_running(tmp_path, monkeypatch):
     await init_db(str(tmp_path / "app.db"))
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
     started = asyncio.Event()
@@ -230,10 +232,10 @@ async def test_stop_marks_queued_and_running(tmp_path, monkeypatch):
     await q.stop()
     running = await get_task(running_id)
     queued = await get_task(queued_id)
-    assert running["status"] in ("cancelled", "failed")
-    assert queued["status"] in ("cancelled", "failed")
-    assert "队列已停止" in running["message"]
-    assert "队列已停止" in queued["message"]
+    assert running["status"] == "queued"
+    assert queued["status"] == "queued"
+    assert "关闭" in running["message"] or "继续" in running["message"]
+    assert "关闭" in queued["message"] or "继续" in queued["message"]
 
 
 @pytest.mark.asyncio
@@ -397,6 +399,45 @@ async def test_recover_pending_on_start(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_parks_active_tasks_for_restart(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    gate = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(10, 100, 1.0)
+        await gate.wait()
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    await _wait_status(tid, "running")
+    await q.stop()
+    from app.db import get_task
+
+    parked = await get_task(tid)
+    assert parked is not None
+    assert parked["status"] == "queued"
+    assert "关闭" in parked["message"] or "继续" in parked["message"]
+
+    resumed = asyncio.Event()
+
+    async def fake_run2(task, on_progress, on_log, cancelled):
+        resumed.set()
+
+    q2 = DownloadQueue(concurrency=1)
+    q2._run_download = fake_run2  # type: ignore
+    await q2.start()
+    await asyncio.wait_for(resumed.wait(), timeout=2)
+    row = await _wait_status(tid, "completed", "failed")
+    await q2.stop()
+    assert row["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_rejects_incompatible_source_target(tmp_path, monkeypatch):
     await init_db(str(tmp_path / "app.db"))
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
@@ -429,3 +470,36 @@ async def test_enqueue_rejects_duplicate_active(tmp_path, monkeypatch):
         await q.enqueue(DownloadCreate(name="org/m", source="huggingface", target="vllm"))
     gate.set()
     await q.stop()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_completed_task_schedules_notify_webhook(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv(
+        "NOTIFY_DINGTALK_WEBHOOK",
+        "https://oapi.dingtalk.com/robot/send?access_token=abc",
+    )
+    monkeypatch.setenv("NOTIFY_ON_COMPLETED", "1")
+    route = respx.post("https://oapi.dingtalk.com/robot/send").mock(
+        return_value=Response(200, json={"errcode": 0})
+    )
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(1, 1, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    row = await _wait_status(tid, "completed", "failed")
+    assert row["status"] == "completed"
+    for _ in range(50):
+        if route.called:
+            break
+        await asyncio.sleep(0.05)
+    await q.stop()
+    assert route.called

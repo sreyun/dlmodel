@@ -57,14 +57,25 @@ class Aria2Client:
         out_dir: str,
         out_name: str,
         connections: int,
+        *,
+        headers: list[str] | None = None,
+        max_tries: int = 5,
     ) -> str:
-        options = {
+        # Cap per-server connections — too many TLS streams amplify mirror EOF.
+        per_server = max(1, min(int(connections), 8))
+        options: dict[str, object] = {
             "dir": out_dir,
             "out": out_name,
-            "split": connections,
-            "max-connection-per-server": connections,
+            "split": str(per_server),
+            "max-connection-per-server": str(per_server),
             "continue": "true",
+            "max-tries": str(max(1, int(max_tries))),
+            "retry-wait": "3",
+            "connect-timeout": "30",
+            "timeout": "120",
         }
+        if headers:
+            options["header"] = list(headers)
         result = await self._call(
             "aria2.addUri",
             self._auth_params(uris, options),
@@ -72,12 +83,19 @@ class Aria2Client:
         return str(result)
 
     async def tell_status(self, gid: str) -> dict:
-        result = await self._call("aria2.tellStatus", self._auth_params(gid))
+        result = await self._call(
+            "aria2.tellStatus",
+            self._auth_params(
+                gid,
+                ["status", "completedLength", "totalLength", "downloadSpeed", "errorMessage"],
+            ),
+        )
         return {
             "status": result["status"],
             "completed_length": int(result["completedLength"]),
             "total_length": int(result["totalLength"]),
             "download_speed": int(result["downloadSpeed"]),
+            "error_message": result.get("errorMessage") or "",
         }
 
     async def force_remove(self, gid: str) -> None:

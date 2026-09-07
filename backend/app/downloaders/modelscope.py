@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -7,8 +8,11 @@ import requests
 from modelscope import snapshot_download
 from modelscope.hub.api import HubApi
 
-from app.config import optional_secret
+from app.config import get_settings, optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
+from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
+
+logger = logging.getLogger(__name__)
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -22,6 +26,16 @@ def _dir_size_bytes(path: Path) -> int:
             except OSError:
                 continue
     return total
+
+
+def _format_bytes(n: int) -> str:
+    value = float(n)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while value >= 1024 and i < len(units) - 1:
+        value /= 1024
+        i += 1
+    return f"{value:.1f} {units[i]}" if i else f"{int(value)} {units[i]}"
 
 
 async def ms_repo_exists(name: str, token: str | None) -> bool:
@@ -43,7 +57,7 @@ async def _drain_thread_task(task: asyncio.Task) -> None:
         pass
 
 
-async def download_modelscope(
+async def _download_modelscope_once(
     name: str,
     dest: Path,
     *,
@@ -55,8 +69,7 @@ async def download_modelscope(
 ) -> None:
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    await on_log(f"正在从 ModelScope 下载 {name}…")
-    await on_progress(0, None, None)
+    await on_progress(_dir_size_bytes(dest), None, None)
 
     def _download() -> str:
         return snapshot_download(
@@ -80,7 +93,7 @@ async def download_modelscope(
             speed = (size - last_size) / elapsed if size >= last_size else None
             await on_progress(size, None, float(speed) if speed and speed > 0 else None)
             if size != last_size and (now - last_log_ts) >= 3.0:
-                await on_log(f"ModelScope 已下载 {size} 字节…")
+                await on_log(f"ModelScope 已下载 {_format_bytes(size)}…")
                 last_log_ts = now
             last_size = size
             last_ts = now
@@ -101,3 +114,53 @@ async def download_modelscope(
     final_size = _dir_size_bytes(dest)
     await on_progress(final_size, final_size if final_size else None, 0.0)
     await on_log(f"ModelScope 下载完成：{result}")
+
+
+async def download_modelscope(
+    name: str,
+    dest: Path,
+    *,
+    token: str | None,
+    revision: str | None,
+    on_progress: ProgressCallback,
+    on_log: LogCallback,
+    on_detached=None,
+    retries: int | None = None,
+) -> None:
+    if retries is None:
+        retries = max(0, int(get_settings().download_retries))
+    attempts = max(1, int(retries) + 1)
+    await on_log(f"正在从 ModelScope 下载 {name}…")
+
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            await _download_modelscope_once(
+                name,
+                dest,
+                token=token,
+                revision=revision,
+                on_progress=on_progress,
+                on_log=on_log,
+                on_detached=on_detached,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts - 1 or not is_transient_network_error(exc):
+                raise
+            delay = retry_backoff_seconds(attempt)
+            msg = (
+                f"ModelScope 网络中断（{exc}），{delay:.0f}s 后重试 "
+                f"（{attempt + 1}/{attempts - 1}）…"
+            )
+            logger.warning(
+                "modelscope retry name=%s attempt=%s err=%s", name, attempt + 1, exc
+            )
+            await on_log(msg)
+            await asyncio.sleep(delay)
+
+    if last_exc is not None:
+        raise last_exc

@@ -14,6 +14,7 @@ async def test_add_uri_and_status():
             "completedLength": "100",
             "totalLength": "100",
             "downloadSpeed": "0",
+            "errorMessage": "",
         }}),
     ])
     client = Aria2Client("http://aria2.test/jsonrpc", secret="token")
@@ -23,6 +24,10 @@ async def test_add_uri_and_status():
     assert st["status"] == "complete"
     assert st["completed_length"] == 100
     assert route.call_count == 2
+    add_body = route.calls[0].request.content
+    assert b"max-tries" in add_body
+    assert b"continue" in add_body
+    assert b"token:token" in add_body
 
 
 @pytest.mark.asyncio

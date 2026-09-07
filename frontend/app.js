@@ -19,10 +19,17 @@ const STATUS_LABEL = {
 
 let pollTimer = null;
 let tasksInFlight = false;
+let tasksRefreshGen = null;
 let routeGen = 0;
 let ignoreHashChange = false;
 let lastTaskFingerprint = "";
 let settingsDirty = false;
+let taskFilter = "all"; // all | active | done | issue
+let taskFlashUntil = 0;
+let cachedTasks = [];
+
+const DOWNLOAD_DRAFT_KEY = "dlmodel_download_draft";
+const TASK_FILTER_KEY = "dlmodel_task_filter";
 
 function $(id) {
   return document.getElementById(id);
@@ -58,6 +65,9 @@ function showFlash(targetId, kind, message) {
   const el = targetId ? $(targetId) : null;
   if (el) {
     setHtml(el, flash(kind, message));
+    if (targetId === "task-error" && kind === "ok") {
+      taskFlashUntil = Date.now() + 3500;
+    }
     return;
   }
   const host = $("toast-host");
@@ -194,6 +204,12 @@ function friendlyMessage(message, status) {
     if (status === "cancelled") return "任务已取消。";
     return "";
   }
+  if (status === "cancelled" && (raw === "已取消" || raw === "队列已停止" || raw.includes("服务关闭"))) {
+    if (raw === "队列已停止" || raw.includes("服务关闭")) {
+      return "服务已关闭，任务已保留，重启后会继续。";
+    }
+    return "任务已取消。";
+  }
   const lower = raw.toLowerCase();
   if (lower.includes("illegal header value") && lower.includes("bearer")) {
     return "HF Token 为空或格式无效。请到「设置」填写有效 Token，或清除无效配置后重试。";
@@ -201,10 +217,24 @@ function friendlyMessage(message, status) {
   if (lower.includes("401") || lower.includes("unauthorized")) {
     return "鉴权失败，请检查 HF / ModelScope Token。";
   }
+  if (
+    lower.includes("unexpected_eof") ||
+    lower.includes("eof occurred") ||
+    lower.includes("ssl:") ||
+    lower.includes("ssl error") ||
+    lower.includes("connection reset") ||
+    lower.includes("remote protocol")
+  ) {
+    return "下载链路中断（常见于国内镜像 TLS 抖动）。可点「重试」；系统会自动断点续传并重试瞬时错误。";
+  }
   if (lower.includes("not found") || raw.includes("未找到模型")) {
     return "未找到该模型，请确认名称与下载源是否正确。";
   }
-  return raw;
+  if (raw.includes("服务重启后重新排队") || raw.includes("下次启动后继续")) {
+    return raw;
+  }
+  // "ModelScope 已下载 2722303781 字节…" → human size
+  return raw.replace(/(\d+)\s*字节/g, (_, n) => fmtBytes(Number(n)));
 }
 
 function taskSummary(tasks) {
@@ -397,7 +427,7 @@ function renderDownload(gen) {
     `
     ${pageHead(
       "下载模型",
-      "填写模型名即可开始。推荐源选「自动」：国内优先魔搭，失败后回落 HF 镜像。",
+      "填写模型名即可；推荐「自动」源（优先魔搭，失败回落 HF 镜像）。",
       btnLink("#/tasks", "查看任务"),
     )}
     <div id="dl-msg" aria-live="polite"></div>
@@ -457,6 +487,44 @@ function renderDownload(gen) {
     return el ? el.value : name === "source" ? "auto" : "vllm";
   };
 
+  const readDraft = () => {
+    try {
+      return JSON.parse(localStorage.getItem(DOWNLOAD_DRAFT_KEY) || "null");
+    } catch {
+      return null;
+    }
+  };
+
+  const writeDraft = () => {
+    const nameEl = $("name");
+    const revisionEl = $("revision");
+    const draft = {
+      name: nameEl ? nameEl.value : "",
+      source: selected("source"),
+      target: selected("target"),
+      revision: revisionEl ? revisionEl.value : "",
+    };
+    localStorage.setItem(DOWNLOAD_DRAFT_KEY, JSON.stringify(draft));
+  };
+
+  const applyDraft = (draft) => {
+    if (!draft || typeof draft !== "object") return;
+    const nameEl = $("name");
+    const revisionEl = $("revision");
+    if (nameEl && draft.name != null) nameEl.value = String(draft.name);
+    if (revisionEl && draft.revision != null) revisionEl.value = String(draft.revision);
+    const allowedSource = new Set(["auto", "modelscope", "huggingface", "ollama"]);
+    const allowedTarget = new Set(["vllm", "ollama"]);
+    if (allowedSource.has(draft.source)) {
+      const src = document.querySelector(`input[name="source"][value="${draft.source}"]`);
+      if (src) src.checked = true;
+    }
+    if (allowedTarget.has(draft.target)) {
+      const tgt = document.querySelector(`input[name="target"][value="${draft.target}"]`);
+      if (tgt) tgt.checked = true;
+    }
+  };
+
   const updateHint = () => {
     const hint = $("dest-hint");
     const name = $("name");
@@ -472,9 +540,12 @@ function renderDownload(gen) {
       warn.textContent = warning;
     }
     if (submit) submit.disabled = Boolean(warning);
+    writeDraft();
   };
 
-  ["name", "source-choices", "target-choices"].forEach((id) => {
+  applyDraft(readDraft());
+
+  ["name", "source-choices", "target-choices", "revision"].forEach((id) => {
     const el = $(id);
     if (!el) return;
     el.addEventListener("input", updateHint);
@@ -486,12 +557,14 @@ function renderDownload(gen) {
     resetBtn.addEventListener("click", () => {
       const form = $("dl-form");
       if (form) form.reset();
+      localStorage.removeItem(DOWNLOAD_DRAFT_KEY);
       updateHint();
     });
   }
 
   const form = $("dl-form");
   if (!form) return;
+  updateHint();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!stillOn("download", gen)) return;
@@ -513,6 +586,7 @@ function renderDownload(gen) {
           method: "POST",
           body: JSON.stringify(body),
         });
+        localStorage.removeItem(DOWNLOAD_DRAFT_KEY);
         const shortId = created && created.id ? `${String(created.id).slice(0, 8)}…` : "";
         sessionStorage.setItem("dlmodel_flash", shortId ? `已加入队列：${shortId}` : "已加入队列");
         location.hash = "#/tasks";
@@ -523,11 +597,28 @@ function renderDownload(gen) {
   });
 }
 
+function filterTasks(tasks, filter) {
+  if (filter === "active") {
+    return tasks.filter((t) => t.status === "running" || t.status === "queued");
+  }
+  if (filter === "done") {
+    return tasks.filter((t) => t.status === "completed");
+  }
+  if (filter === "issue") {
+    return tasks.filter((t) => t.status === "failed" || t.status === "cancelled");
+  }
+  return tasks;
+}
+
 function taskCard(task) {
   const canCancel = !TERMINAL.has(task.status);
   const canRetry = task.status === "failed" || task.status === "cancelled";
+  const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
   const pct = progressPct(task);
-  const eta = fmtEta(task.progress_bytes, task.total_bytes, task.speed_bps);
+  const showSpeed = task.status === "running" || task.status === "queued";
+  const eta = showSpeed
+    ? fmtEta(task.progress_bytes, task.total_bytes, task.speed_bps)
+    : null;
   const msg = friendlyMessage(task.message, task.status);
   const fillClass = [
     "progress-fill",
@@ -544,82 +635,143 @@ function taskCard(task) {
   if (task.status === "cancelled") width = 100;
   else if (pct == null) width = task.status === "failed" || task.status === "completed" ? 100 : 35;
   else width = pct;
-  return `<article class="task-card ${task.status === "running" ? "is-running" : ""}" data-id="${esc(task.id)}">
+  const rightMeta = showSpeed
+    ? `${esc(fmtSpeed(task.speed_bps))}${eta ? ` · ETA ${eta}` : ""}`
+    : "";
+  const showMsg =
+    msg &&
+    (task.status === "running" ||
+      task.status === "queued" ||
+      task.status === "failed" ||
+      (task.status === "cancelled" && msg !== "任务已取消。"));
+  return `<article class="task-card status-${esc(task.status)} ${task.status === "running" ? "is-running" : ""}" data-id="${esc(task.id)}">
     <div class="task-top">
-      <div>
-        <div class="task-title">${esc(task.name)}</div>
-        <div class="task-meta">
+      <div class="task-main">
+        <div class="task-title-row">
+          <div class="task-title">${esc(task.name)}</div>
           <span class="chip status-${esc(task.status)}">${esc(statusLabel(task.status))}</span>
+        </div>
+        <div class="task-meta">
           <span class="chip">${esc(sourceLabel(task.source))} → ${esc(targetLabel(task.target))}</span>
           <span class="chip mono" title="${esc(task.id)}">#${esc(String(task.id).slice(0, 8))}</span>
+          ${rightMeta ? `<span class="chip muted-chip">${rightMeta}</span>` : ""}
         </div>
       </div>
       <div class="task-actions">
-        ${canCancel ? `<button data-act="cancel" data-id="${esc(task.id)}">取消</button>` : ""}
-        ${canRetry ? `<button class="primary" data-act="retry" data-id="${esc(task.id)}">重试</button>` : ""}
+        ${canCancel ? `<button type="button" data-act="cancel" data-id="${esc(task.id)}" title="取消下载">取消</button>` : ""}
+        ${canRetry ? `<button type="button" class="primary" data-act="retry" data-id="${esc(task.id)}" title="重新加入队列">重试</button>` : ""}
+        ${canDelete ? `<button type="button" class="danger" data-act="delete" data-id="${esc(task.id)}" data-name="${esc(task.name)}" title="删除任务记录（不删模型文件）">删除</button>` : ""}
       </div>
     </div>
     <div class="progress-block">
       <div class="progress-row">
         <span>${esc(progressLabel(task))}</span>
-        <span class="muted">${esc(fmtSpeed(task.speed_bps))}${eta ? ` · ETA ${eta}` : ""}</span>
       </div>
       <div class="progress-track"><div class="${fillClass}" style="width:${width}%"></div></div>
     </div>
-    ${msg ? `<div class="task-message ${task.status === "failed" ? "error" : ""}">${esc(msg)}</div>` : ""}
+    ${showMsg ? `<div class="task-message ${task.status === "failed" ? "error" : ""}">${esc(msg)}</div>` : ""}
   </article>`;
 }
 
-function tasksFingerprint(tasks) {
-  return tasks
+function tasksFingerprint(tasks, filter) {
+  return (
+    filter +
+    "|" +
+    tasks
+      .map(
+        (t) =>
+          `${t.id}:${t.status}:${t.progress_bytes}:${t.total_bytes}:${t.speed_bps}:${t.message}`,
+      )
+      .join("|")
+  );
+}
+
+function renderTaskFilterBar(counts) {
+  const items = [
+    ["all", "全部", counts.queued + counts.running + counts.completed + counts.failed + counts.cancelled],
+    ["active", "进行中", counts.queued + counts.running],
+    ["done", "已完成", counts.completed],
+    ["issue", "失败/取消", counts.failed + counts.cancelled],
+  ];
+  return items
     .map(
-      (t) =>
-        `${t.id}:${t.status}:${t.progress_bytes}:${t.total_bytes}:${t.speed_bps}:${t.message}`,
+      ([key, label, n]) =>
+        `<button type="button" class="filter-chip ${taskFilter === key ? "active" : ""}" data-filter="${key}">${label}<span class="count">${n}</span></button>`,
     )
-    .join("|");
+    .join("");
+}
+
+function paintTaskList(tasks) {
+  const body = $("task-list");
+  if (!body) return;
+  const filtered = filterTasks(tasks, taskFilter);
+  setHtml(
+    body,
+    filtered.length
+      ? filtered.map(taskCard).join("")
+      : `<div class="empty"><strong>没有符合条件的任务</strong>${
+          taskFilter === "all"
+            ? "去「下载」页提交第一个模型。"
+            : "切换筛选，或新建下载任务。"
+        }</div>`,
+  );
 }
 
 async function refreshTasks(gen) {
-  if (tasksInFlight || !stillOn("tasks", gen ?? routeGen)) return;
-  tasksInFlight = true;
   const myGen = gen ?? routeGen;
+  if (!stillOn("tasks", myGen)) return;
+  if (tasksInFlight) {
+    tasksRefreshGen = myGen;
+    return;
+  }
+  tasksInFlight = true;
   try {
     const tasks = await apiJson("/api/downloads");
     if (!stillOn("tasks", myGen)) return;
-    clearFlash("task-error");
+    cachedTasks = tasks;
+    const box = $("task-error");
+    if (box) {
+      const hasOk = box.querySelector(".flash.ok");
+      const hasErr = box.querySelector(".flash.error");
+      if (hasErr) clearFlash("task-error");
+      else if (hasOk && Date.now() > taskFlashUntil) clearFlash("task-error");
+    }
     const counts = taskSummary(tasks);
     const stats = $("task-stats");
     if (stats) {
       setHtml(
         stats,
         `
-        <div class="stat"><div class="label">进行中</div><div class="value">${counts.running}</div></div>
-        <div class="stat"><div class="label">排队中</div><div class="value">${counts.queued}</div></div>
-        <div class="stat"><div class="label">已完成</div><div class="value">${counts.completed}</div></div>
-        <div class="stat"><div class="label">失败 / 取消</div><div class="value">${counts.failed + counts.cancelled}</div></div>
+        <button type="button" class="stat clickable ${taskFilter === "active" ? "selected" : ""}" data-filter="active"><div class="label">进行中</div><div class="value accent">${counts.running}</div></button>
+        <button type="button" class="stat clickable" data-filter="active"><div class="label">排队中</div><div class="value">${counts.queued}</div></button>
+        <button type="button" class="stat clickable ${taskFilter === "done" ? "selected" : ""}" data-filter="done"><div class="label">已完成</div><div class="value ok">${counts.completed}</div></button>
+        <button type="button" class="stat clickable ${taskFilter === "issue" ? "selected" : ""}" data-filter="issue"><div class="label">失败 / 取消</div><div class="value danger">${counts.failed + counts.cancelled}</div></button>
       `,
       );
+    }
+    const filters = $("task-filters");
+    if (filters) setHtml(filters, renderTaskFilterBar(counts));
+    const clearBtn = $("clear-completed");
+    if (clearBtn) {
+      clearBtn.disabled = counts.completed < 1;
+      clearBtn.textContent = counts.completed
+        ? `清除已完成 (${counts.completed})`
+        : "清除已完成";
     }
     const stamp = $("task-updated");
     if (stamp) {
       const now = new Date();
       stamp.textContent = `更新于 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
     }
-    const body = $("task-list");
-    if (!body) return;
-    const nextFp = tasksFingerprint(tasks);
+    const nextFp = tasksFingerprint(tasks, taskFilter);
     const active = document.activeElement;
     const focusAct = active && active.getAttribute ? active.getAttribute("data-act") : null;
     const focusId = active && active.getAttribute ? active.getAttribute("data-id") : null;
     if (nextFp !== lastTaskFingerprint) {
       lastTaskFingerprint = nextFp;
-      setHtml(
-        body,
-        tasks.length
-          ? tasks.map(taskCard).join("")
-          : `<div class="empty"><strong>还没有下载任务</strong>去「下载」页提交第一个模型，进度会实时出现在这里。</div>`,
-      );
-      if (focusAct && focusId) {
+      paintTaskList(tasks);
+      const body = $("task-list");
+      if (body && focusAct && focusId) {
         const btn = body.querySelector(`button[data-act="${focusAct}"][data-id="${focusId}"]`);
         if (btn) btn.focus();
       }
@@ -640,6 +792,11 @@ async function refreshTasks(gen) {
     showFlash("task-error", "error", msg);
   } finally {
     tasksInFlight = false;
+    const pendingGen = tasksRefreshGen;
+    tasksRefreshGen = null;
+    if (pendingGen != null && stillOn("tasks", pendingGen)) {
+      queueMicrotask(() => refreshTasks(pendingGen));
+    }
   }
 }
 
@@ -647,28 +804,110 @@ function renderTasks(gen) {
   const root = appRoot();
   if (!root) return;
   lastTaskFingerprint = "";
+  cachedTasks = [];
+  tasksRefreshGen = null;
+  try {
+    const savedFilter = sessionStorage.getItem(TASK_FILTER_KEY);
+    if (savedFilter && ["all", "active", "done", "issue"].includes(savedFilter)) {
+      taskFilter = savedFilter;
+    }
+  } catch {
+    /* ignore */
+  }
   const pending = sessionStorage.getItem("dlmodel_flash");
-  if (pending) sessionStorage.removeItem("dlmodel_flash");
+  if (pending) {
+    sessionStorage.removeItem("dlmodel_flash");
+    taskFlashUntil = Date.now() + 3500;
+  }
   setHtml(
     root,
     `
     ${pageHead(
       "下载任务",
-      "实时查看进度、速度与剩余时间。失败或已取消的任务可一键重试。",
-      btnLink("#/download", "新建下载", true),
+      "查看进度；已完成 / 失败 / 已取消均可删除记录。任务与配置保存在本地 SQLite，重启后继续。",
+      `${btnLink("#/download", "新建下载", true)}`,
     )}
     <div id="task-error" aria-live="polite">${pending ? flash("ok", pending) : ""}</div>
-    <p class="task-updated" id="task-updated">正在同步…</p>
-    <div class="stats" id="task-stats">
-      <div class="stat"><div class="label">进行中</div><div class="value">—</div></div>
-      <div class="stat"><div class="label">排队中</div><div class="value">—</div></div>
-      <div class="stat"><div class="label">已完成</div><div class="value">—</div></div>
-      <div class="stat"><div class="label">失败 / 取消</div><div class="value">—</div></div>
+    <div class="stats" id="task-stats"></div>
+    <div class="task-toolbar">
+      <div class="filter-bar" id="task-filters" role="tablist" aria-label="任务筛选"></div>
+      <div class="toolbar-right">
+        <p class="task-updated" id="task-updated">正在同步…</p>
+        <button type="button" id="clear-completed" class="ghost" disabled>清除已完成</button>
+      </div>
     </div>
     <div id="task-list" class="task-list" aria-live="polite">
       <div class="empty"><div class="skeleton" style="width:40%;margin:0 auto 10px;"></div>加载中…</div>
     </div>`,
   );
+
+  const applyFilter = (next) => {
+    if (!next || next === taskFilter) {
+      if (next === taskFilter) {
+        lastTaskFingerprint = "";
+        paintTaskList(cachedTasks);
+      }
+      return;
+    }
+    taskFilter = next;
+    try {
+      sessionStorage.setItem(TASK_FILTER_KEY, taskFilter);
+    } catch {
+      /* ignore */
+    }
+    lastTaskFingerprint = "";
+    const counts = taskSummary(cachedTasks);
+    const filters = $("task-filters");
+    if (filters) setHtml(filters, renderTaskFilterBar(counts));
+    paintTaskList(cachedTasks);
+    refreshTasks(gen);
+  };
+
+  const stats = $("task-stats");
+  if (stats) {
+    stats.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-filter]");
+      if (!btn || !stillOn("tasks", gen)) return;
+      applyFilter(btn.getAttribute("data-filter"));
+    });
+  }
+  const filters = $("task-filters");
+  if (filters) {
+    filters.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-filter]");
+      if (!btn || !stillOn("tasks", gen)) return;
+      applyFilter(btn.getAttribute("data-filter"));
+    });
+  }
+
+  const clearBtn = $("clear-completed");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      if (!stillOn("tasks", gen)) return;
+      const n = taskSummary(cachedTasks).completed;
+      if (!n) return;
+      if (!confirm(`确认清除 ${n} 条已完成任务记录？\n不会删除模型文件。`)) return;
+      setBusy(clearBtn, true, "清除中…");
+      try {
+        await guarded(
+          async () => {
+            const res = await apiJson("/api/downloads/cleanup", {
+              method: "POST",
+              body: JSON.stringify({ statuses: ["completed"] }),
+            });
+            lastTaskFingerprint = "";
+            showFlash("task-error", "ok", `已清除 ${res.deleted || n} 条已完成任务`);
+            await refreshTasks(gen);
+          },
+          { gen, page: "tasks", flashId: "task-error" },
+        );
+      } finally {
+        if (stillOn("tasks", gen) && $("clear-completed")) {
+          setBusy($("clear-completed"), false);
+        }
+      }
+    });
+  }
 
   const list = $("task-list");
   if (list) {
@@ -680,17 +919,46 @@ function renderTasks(gen) {
       if (act === "cancel") {
         if (!confirm("确认取消该下载任务？进行中的传输将被中断。")) return;
       }
+      if (act === "delete") {
+        const name = btn.getAttribute("data-name") || id;
+        if (!confirm(`确认删除任务「${name}」？\n仅删除任务记录，不会删除已下载的模型文件。`)) return;
+        setBusy(btn, true, "删除中…");
+        try {
+          await guarded(
+            async () => {
+              await apiJson(`/api/downloads/${encodeURIComponent(id)}`, {
+                method: "DELETE",
+              });
+              lastTaskFingerprint = "";
+              showFlash("task-error", "ok", `已删除任务 ${name}`);
+              await refreshTasks(gen);
+            },
+            { gen, page: "tasks", flashId: "task-error" },
+          );
+        } finally {
+          if (stillOn("tasks", gen) && document.body.contains(btn)) {
+            setBusy(btn, false);
+          }
+        }
+        return;
+      }
       setBusy(btn, true, act === "cancel" ? "取消中…" : "重试中…");
-      await guarded(
-        async () => {
-          await apiJson(`/api/downloads/${encodeURIComponent(id)}/${act}`, {
-            method: "POST",
-          });
-          lastTaskFingerprint = "";
-          await refreshTasks(gen);
-        },
-        { gen, page: "tasks", flashId: "task-error" },
-      );
+      try {
+        await guarded(
+          async () => {
+            await apiJson(`/api/downloads/${encodeURIComponent(id)}/${act}`, {
+              method: "POST",
+            });
+            lastTaskFingerprint = "";
+            await refreshTasks(gen);
+          },
+          { gen, page: "tasks", flashId: "task-error" },
+        );
+      } finally {
+        if (stillOn("tasks", gen) && document.body.contains(btn)) {
+          setBusy(btn, false);
+        }
+      }
     });
   }
 
@@ -711,6 +979,7 @@ function modelCard(m) {
         <div class="model-path">${esc(m.path)}</div>
       </div>
       <div class="model-actions">
+        <button type="button" class="primary" data-use-vllm="${esc(m.path)}">用于 vLLM</button>
         <button type="button" data-copy="${esc(m.path)}">复制路径</button>
         <button class="danger" data-del="${esc(m.id)}" data-name="${esc(m.name)}">删除</button>
       </div>
@@ -745,7 +1014,7 @@ function renderLibrary(gen) {
     `
     ${pageHead(
       "模型库",
-      "浏览本机已下载的 HF 布局权重，核对路径与占用空间，按需清理。",
+      "浏览已下载的 HF 布局权重，核对占用并按需清理。",
       `${btnLink("#/download", "去下载", true)}<button type="button" id="lib-refresh">刷新</button>`,
     )}
     <div id="lib-msg" aria-live="polite"></div>
@@ -793,6 +1062,12 @@ function renderLibrary(gen) {
   const body = $("lib-body");
   if (body) {
     body.addEventListener("click", async (event) => {
+      const useBtn = event.target.closest("button[data-use-vllm]");
+      if (useBtn && stillOn("library", gen)) {
+        sessionStorage.setItem("dlmodel_vllm_model", useBtn.getAttribute("data-use-vllm") || "");
+        location.hash = "#/services";
+        return;
+      }
       const copyBtn = event.target.closest("button[data-copy]");
       if (copyBtn && stillOn("library", gen)) {
         const ok = await copyText(copyBtn.getAttribute("data-copy") || "");
@@ -834,7 +1109,7 @@ function renderServices(gen) {
   setHtml(
     root,
     `
-    ${pageHead("推理服务", "检查 Ollama / vLLM 连通性，拉取模型或复制启动命令。管理端与推理端可分离。")}
+    ${pageHead("推理服务", "检查 Ollama / vLLM，拉取模型或复制启动命令。")}
     <div class="service-grid">
       <section class="service-card">
         <div class="service-top">
@@ -1031,6 +1306,16 @@ function renderServices(gen) {
   }
 
   hydrateLibraryPaths();
+  const preset = sessionStorage.getItem("dlmodel_vllm_model");
+  if (preset) {
+    sessionStorage.removeItem("dlmodel_vllm_model");
+    const modelEl = $("vllm-model");
+    if (modelEl) {
+      modelEl.value = preset;
+      modelEl.focus();
+    }
+    showFlash("vllm-msg", "ok", "已填入模型库路径，可生成启动命令");
+  }
   loadOllama();
   loadVllm();
 }
@@ -1042,7 +1327,7 @@ function renderSettings(gen) {
   setHtml(
     root,
     `
-    ${pageHead("设置", "配置镜像、鉴权、并发与推理地址。空 Token 不会覆盖已有密钥；可显式清除。")}
+    ${pageHead("设置", "镜像、鉴权、并发、推理地址与机器人推送。空 Token/Webhook 不覆盖；可显式清除。")}
     <div id="set-msg" aria-live="polite"></div>
     <form id="set-form" class="settings-sections">
       <p id="set-loading" class="panel muted">正在加载当前配置…</p>
@@ -1082,6 +1367,40 @@ function renderSettings(gen) {
           <label class="field"><span>vLLM 服务地址</span><input id="vllm_base_url" autocomplete="off" required></label>
         </div>
       </section>
+      <section class="panel section-card">
+        <h3>消息推送</h3>
+        <p class="lead">配置钉钉 / 飞书 / 企业微信机器人 Webhook。仅在任务状态变更时推送摘要（含当前进度），不会按百分比刷屏。</p>
+        <div class="form-grid">
+          <label class="field full">
+            <span>钉钉机器人 Webhook（留空表示不修改）</span>
+            <input id="notify_dingtalk_webhook" type="password" autocomplete="new-password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=…">
+            <span id="dingtalk_webhook_hint" class="hint"></span>
+            <label class="checkbox-row"><input type="checkbox" id="clear_notify_dingtalk_webhook"> 清除钉钉 Webhook</label>
+          </label>
+          <label class="field full">
+            <span>飞书机器人 Webhook（留空表示不修改）</span>
+            <input id="notify_feishu_webhook" type="password" autocomplete="new-password" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
+            <span id="feishu_webhook_hint" class="hint"></span>
+            <label class="checkbox-row"><input type="checkbox" id="clear_notify_feishu_webhook"> 清除飞书 Webhook</label>
+          </label>
+          <label class="field full">
+            <span>企业微信机器人 Webhook（留空表示不修改）</span>
+            <input id="notify_wecom_webhook" type="password" autocomplete="new-password" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…">
+            <span id="wecom_webhook_hint" class="hint"></span>
+            <label class="checkbox-row"><input type="checkbox" id="clear_notify_wecom_webhook"> 清除企业微信 Webhook</label>
+          </label>
+        </div>
+        <div class="notify-events">
+          <span class="field-label">推送时机</span>
+          <label class="checkbox-row"><input type="checkbox" id="notify_on_completed"> 下载完成</label>
+          <label class="checkbox-row"><input type="checkbox" id="notify_on_failed"> 下载失败</label>
+          <label class="checkbox-row"><input type="checkbox" id="notify_on_started"> 开始下载</label>
+          <label class="checkbox-row"><input type="checkbox" id="notify_on_cancelled"> 任务取消</label>
+        </div>
+        <div class="actions notify-test-actions">
+          <button type="button" id="notify-test-all" class="btn">发送测试消息</button>
+        </div>
+      </section>
       </fieldset>
       <div class="actions">
         <button class="primary" id="set-save" type="submit" disabled>保存设置</button>
@@ -1097,12 +1416,34 @@ function renderSettings(gen) {
     "ollama_base_url",
     "vllm_base_url",
   ];
+  const boolFields = [
+    "notify_on_completed",
+    "notify_on_failed",
+    "notify_on_started",
+    "notify_on_cancelled",
+  ];
+  const webhookHints = [
+    ["dingtalk_webhook_hint", "notify_dingtalk_webhook_set", "钉钉"],
+    ["feishu_webhook_hint", "notify_feishu_webhook_set", "飞书"],
+    ["wecom_webhook_hint", "notify_wecom_webhook_set", "企业微信"],
+  ];
+
+  const applyWebhookHints = (data) => {
+    webhookHints.forEach(([hintId, setKey, label]) => {
+      const hint = $(hintId);
+      if (!hint) return;
+      hint.textContent = data[setKey]
+        ? `当前已配置${label} Webhook（输入新值才会覆盖）`
+        : `当前未配置${label} Webhook`;
+    });
+  };
 
   const markDirty = () => {
     settingsDirty = true;
   };
   const form = $("set-form");
   if (form) form.addEventListener("input", markDirty);
+  if (form) form.addEventListener("change", markDirty);
 
   const hydrate = async () => {
     const reloadBtn = $("set-reload");
@@ -1116,6 +1457,10 @@ function renderSettings(gen) {
           if (!el || data[key] == null) return;
           el.value = String(data[key]);
         });
+        boolFields.forEach((key) => {
+          const el = $(key);
+          if (el) el.checked = Boolean(data[key]);
+        });
         const hfHint = $("hf_token_hint");
         const msHint = $("ms_token_hint");
         if (hfHint) {
@@ -1128,6 +1473,7 @@ function renderSettings(gen) {
             ? "当前已配置 ModelScope Token（输入新值才会覆盖）"
             : "当前未配置 ModelScope Token";
         }
+        applyWebhookHints(data);
         const loading = $("set-loading");
         if (loading) loading.remove();
         const fieldset = $("set-fields");
@@ -1150,6 +1496,42 @@ function renderSettings(gen) {
   };
 
   hydrate();
+
+  const testBtn = $("notify-test-all");
+  if (testBtn) {
+    testBtn.addEventListener("click", async () => {
+      if (!stillOn("settings", gen)) return;
+      setBusy(testBtn, true, "发送中…");
+      const payload = { channel: "all" };
+      const ding = $("notify_dingtalk_webhook");
+      const feishu = $("notify_feishu_webhook");
+      const wecom = $("notify_wecom_webhook");
+      if (ding && ding.value.trim()) payload.notify_dingtalk_webhook = ding.value.trim();
+      if (feishu && feishu.value.trim()) payload.notify_feishu_webhook = feishu.value.trim();
+      if (wecom && wecom.value.trim()) payload.notify_wecom_webhook = wecom.value.trim();
+      await guarded(
+        async () => {
+          const result = await apiJson("/api/settings/notify-test", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          if (!stillOn("settings", gen)) return;
+          const parts = Object.entries(result.results || {}).map(
+            ([ch, status]) => `${ch}: ${status}`,
+          );
+          showFlash(
+            "set-msg",
+            "ok",
+            parts.length
+              ? `测试已发送（${parts.join("；")}）。若使用了表单中的新 Webhook，请记得点「保存设置」。`
+              : "测试已发送",
+          );
+        },
+        { gen, page: "settings", flashId: "set-msg" },
+      );
+      if (stillOn("settings", gen)) setBusy(testBtn, false);
+    });
+  }
 
   if (!form) return;
   form.addEventListener("submit", async (event) => {
@@ -1182,6 +1564,10 @@ function renderSettings(gen) {
       aria2_connections: connections,
       ollama_base_url: required.ollama_base_url.value.trim(),
       vllm_base_url: required.vllm_base_url.value.trim(),
+      notify_on_completed: Boolean($("notify_on_completed")?.checked),
+      notify_on_failed: Boolean($("notify_on_failed")?.checked),
+      notify_on_started: Boolean($("notify_on_started")?.checked),
+      notify_on_cancelled: Boolean($("notify_on_cancelled")?.checked),
     };
     const hfTokenEl = $("hf_token");
     const msTokenEl = $("modelscope_api_token");
@@ -1193,6 +1579,20 @@ function renderSettings(gen) {
     const clearMs = $("clear_modelscope_api_token");
     if (clearHf && clearHf.checked) body.clear_hf_token = true;
     if (clearMs && clearMs.checked) body.clear_modelscope_api_token = true;
+
+    const webhookInputs = [
+      ["notify_dingtalk_webhook", "clear_notify_dingtalk_webhook"],
+      ["notify_feishu_webhook", "clear_notify_feishu_webhook"],
+      ["notify_wecom_webhook", "clear_notify_wecom_webhook"],
+    ];
+    webhookInputs.forEach(([inputId, clearId]) => {
+      const el = $(inputId);
+      const clearEl = $(clearId);
+      const value = el ? el.value.trim() : "";
+      if (value) body[inputId] = value;
+      if (clearEl && clearEl.checked) body[clearId] = true;
+    });
+
     const saveBtn = $("set-save");
     setBusy(saveBtn, true, "保存中…");
     await guarded(
@@ -1206,6 +1606,12 @@ function renderSettings(gen) {
         if (msTokenEl) msTokenEl.value = "";
         if (clearHf) clearHf.checked = false;
         if (clearMs) clearMs.checked = false;
+        webhookInputs.forEach(([inputId, clearId]) => {
+          const el = $(inputId);
+          const clearEl = $(clearId);
+          if (el) el.value = "";
+          if (clearEl) clearEl.checked = false;
+        });
         const hfHint = $("hf_token_hint");
         const msHint = $("ms_token_hint");
         if (hfHint) {
@@ -1218,6 +1624,11 @@ function renderSettings(gen) {
             ? "当前已配置 ModelScope Token（输入新值才会覆盖）"
             : "当前未配置 ModelScope Token";
         }
+        applyWebhookHints(saved);
+        boolFields.forEach((key) => {
+          const el = $(key);
+          if (el && saved[key] != null) el.checked = Boolean(saved[key]);
+        });
         settingsDirty = false;
         showFlash("set-msg", "ok", "设置已保存");
       },

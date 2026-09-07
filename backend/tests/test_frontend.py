@@ -46,6 +46,14 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "if (msToken) body.modelscope_api_token = msToken" in js.text
         assert "clear_hf_token" in js.text
         assert "hf_token_set" in js.text
+        assert "notify_dingtalk_webhook" in js.text
+        assert "notify_on_completed" in js.text
+        assert "/api/settings/notify-test" in js.text
+        assert "消息推送" in js.text
+        assert "tasksRefreshGen" in js.text
+        assert "dlmodel_download_draft" in js.text
+        assert "unexpected_eof" in js.text.lower()
+        assert 'task.status === "queued"' in js.text
         assert "stillOn" in js.text
         assert "set-msg" in js.text
         assert "login-token" in js.text
@@ -53,6 +61,9 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "progress-fill" in js.text
         assert "taskCard" in js.text
         assert "pairWarning" in js.text
+        assert 'data-act="delete"' in js.text or "data-act=\"delete\"" in js.text
+        assert "/api/downloads/cleanup" in js.text
+        assert "clear-completed" in js.text
         assert 'class="btn' in js.text
         css = client.get("/styles.css")
         assert css.status_code == 200

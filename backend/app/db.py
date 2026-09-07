@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import aiosqlite
@@ -57,9 +58,13 @@ def _validate_fields(fields: dict) -> dict:
 
 async def init_db(db_path: str) -> None:
     global _DB_PATH
-    _DB_PATH = db_path
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _DB_PATH = str(path)
 
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
@@ -253,3 +258,31 @@ async def get_task(task_id: str) -> dict | None:
         ) as cursor:
             row = await cursor.fetchone()
             return _row_to_dict(row) if row else None
+
+
+async def delete_task(task_id: str, *, statuses: tuple[str, ...] | None = None) -> bool:
+    """Delete a task row. If statuses given, only delete when status matches."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            cursor = await db.execute(
+                f"DELETE FROM tasks WHERE id = ? AND status IN ({placeholders})",
+                (task_id, *statuses),
+            )
+        else:
+            cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_tasks_by_status(*statuses: str) -> int:
+    if not statuses:
+        return 0
+    placeholders = ", ".join("?" for _ in statuses)
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            f"DELETE FROM tasks WHERE status IN ({placeholders})",
+            statuses,
+        )
+        await db.commit()
+        return cursor.rowcount

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 from app.aria2_client import Aria2Client
@@ -26,12 +27,16 @@ from app.paths import ensure_under_model_root, hf_model_dir, ollama_root, parse_
 from app.routes.settings import effective_settings
 from app.source_resolve import resolve_source
 
+logger = logging.getLogger(__name__)
+
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _SOURCE_ZH = {
     "huggingface": "Hugging Face",
     "modelscope": "ModelScope",
     "ollama": "Ollama",
 }
+_SHUTDOWN_MSG = "服务关闭，下次启动后继续…"
+_RECOVER_MSG = "服务重启后重新排队…"
 
 
 class DownloadCancelled(Exception):
@@ -78,34 +83,49 @@ class DownloadQueue:
         self._aria2: Aria2Client | None = None
         self._stopping = False
         self._busy_dests: set[str] = set()
+        self._notify_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         if self._started:
             return
         self._started = True
+        self._stopping = False
         settings = get_settings()
         self._aria2 = Aria2Client(
             settings.aria2_rpc_url, secret=settings.aria2_rpc_secret
         )
         for _ in range(self.concurrency):
             self._spawn_worker()
-        await self._recover_pending_tasks()
+        recovered = await self._recover_pending_tasks()
+        logger.info(
+            "download queue started concurrency=%s recovered=%s",
+            self.concurrency,
+            recovered,
+        )
 
-    async def _recover_pending_tasks(self) -> None:
+    async def _recover_pending_tasks(self) -> int:
         rows = await list_tasks_by_status("queued", "running")
         for row in rows:
             task_id = row["id"]
             self._cancel_flags.setdefault(task_id, asyncio.Event())
             self._task_gids.setdefault(task_id, [])
-            if row["status"] == "running":
-                await update_task(
-                    task_id,
-                    status="queued",
-                    message="服务重启后重新排队…",
-                    speed_bps=None,
-                )
+            # Park interrupted runs; clear speed so UI does not show a stale ETA.
+            # Keep progress_bytes — downloaders resume where possible.
+            await update_task(
+                task_id,
+                status="queued",
+                message=_RECOVER_MSG,
+                speed_bps=None,
+            )
             await self._pending.put(task_id)
             await self._publish(task_id)
+            logger.info(
+                "recovered task id=%s name=%s prior_status=%s",
+                task_id[:8],
+                row.get("name"),
+                row["status"],
+            )
+        return len(rows)
 
     def _spawn_worker(self) -> None:
         worker_id = self._next_worker_id
@@ -114,34 +134,61 @@ class DownloadQueue:
 
     async def resize(self, concurrency: int) -> None:
         concurrency = max(1, int(concurrency))
+        previous = self.concurrency
         self.concurrency = concurrency
         self._workers = [w for w in self._workers if not w.done()]
         while self._started and len(self._workers) < concurrency:
             self._spawn_worker()
+        if previous != concurrency:
+            logger.info("download concurrency resized %s -> %s", previous, concurrency)
 
     def _cancel_message(self) -> str:
-        return "队列已停止" if self._stopping else "已取消"
+        return "已取消"
 
     async def stop(self) -> None:
+        """Graceful process shutdown: park active tasks in SQLite for next boot.
+
+        Does not mark downloads cancelled — compose restart / SIGTERM must keep
+        task history durable until the user deletes it.
+        """
+        if not self._started and not self._workers:
+            return
         self._started = False
         self._stopping = True
         try:
+            parked = 0
             for row in await list_tasks_by_status("queued", "running"):
-                flag = self._cancel_flags.setdefault(row["id"], asyncio.Event())
-                flag.set()
-                await self._remove_aria2_gids(row["id"])
-                await update_active_task(
-                    row["id"], status="cancelled", message=self._cancel_message()
+                task_id = row["id"]
+                await self._remove_aria2_gids(task_id)
+                changed = await update_active_task(
+                    task_id,
+                    status="queued",
+                    message=_SHUTDOWN_MSG,
+                    speed_bps=None,
                 )
-                await self._publish(row["id"])
+                if changed:
+                    await self._publish(task_id)
+                    parked += 1
+                    logger.info(
+                        "parked task on shutdown id=%s name=%s",
+                        task_id[:8],
+                        row.get("name"),
+                    )
             for worker in self._workers:
                 worker.cancel()
             if self._workers:
                 await asyncio.gather(*self._workers, return_exceptions=True)
             self._workers = []
+            self._cancel_flags.clear()
+            self._task_gids.clear()
+            self._busy_dests.clear()
+            if self._notify_tasks:
+                await asyncio.gather(*list(self._notify_tasks), return_exceptions=True)
+                self._notify_tasks.clear()
             if self._aria2 is not None:
                 await self._aria2.close()
                 self._aria2 = None
+            logger.info("download queue stopped parked=%s", parked)
         finally:
             self._stopping = False
 
@@ -179,6 +226,13 @@ class DownloadQueue:
         self._task_gids[task_id] = []
         await self._pending.put(task_id)
         await self._publish(task_id)
+        logger.info(
+            "enqueued task id=%s name=%s source=%s target=%s",
+            task_id[:8],
+            payload.name,
+            payload.source,
+            payload.target,
+        )
         return task_id
 
     async def cancel(self, task_id: str) -> None:
@@ -191,6 +245,7 @@ class DownloadQueue:
         await self._remove_aria2_gids(task_id)
         if changed:
             await self._publish(task_id)
+            logger.info("cancelled task id=%s", task_id[:8])
 
     async def retry(self, task_id: str) -> None:
         row = await get_task(task_id)
@@ -247,6 +302,17 @@ class DownloadQueue:
             try:
                 await self._process(task_id)
             except asyncio.CancelledError:
+                if self._stopping:
+                    try:
+                        await update_active_task(
+                            task_id,
+                            status="queued",
+                            message=_SHUTDOWN_MSG,
+                            speed_bps=None,
+                        )
+                    except Exception:
+                        logger.exception("park on cancel failed id=%s", task_id[:8])
+                    return
                 raise
             except DownloadCancelled:
                 try:
@@ -254,7 +320,7 @@ class DownloadQueue:
                         task_id, status="cancelled", message=self._cancel_message()
                     )
                 except Exception:
-                    pass
+                    logger.exception("cancel finish failed id=%s", task_id[:8])
             except Exception as exc:
                 try:
                     if self._cancel_flags.get(task_id) and self._cancel_flags[task_id].is_set():
@@ -264,11 +330,14 @@ class DownloadQueue:
                             message=self._cancel_message(),
                         )
                     else:
+                        logger.warning(
+                            "download failed id=%s err=%s", task_id[:8], exc
+                        )
                         await self._finish_if_active(
                             task_id, status="failed", message=f"下载失败：{exc}"
                         )
                 except Exception:
-                    pass
+                    logger.exception("failure finish failed id=%s", task_id[:8])
             finally:
                 self._pending.task_done()
 
@@ -291,6 +360,12 @@ class DownloadQueue:
             return
         row = await get_task(task_id)
         await self._publish(task_id)
+        logger.info(
+            "task status id=%s status=running name=%s",
+            task_id[:8],
+            (row or {}).get("name"),
+        )
+        await self._schedule_notify(task_id, "running")
         if cancelled.is_set():
             await self._finish_if_active(
                 task_id, status="cancelled", message=self._cancel_message()
@@ -337,6 +412,14 @@ class DownloadQueue:
             )
             return
         except asyncio.CancelledError:
+            if self._stopping:
+                await update_active_task(
+                    task_id,
+                    status="queued",
+                    message=_SHUTDOWN_MSG,
+                    speed_bps=None,
+                )
+                return
             if cancelled.is_set():
                 await self._finish_if_active(
                     task_id, status="cancelled", message=self._cancel_message()
@@ -349,6 +432,7 @@ class DownloadQueue:
                     task_id, status="cancelled", message=self._cancel_message()
                 )
                 return
+            logger.warning("download failed id=%s err=%s", task_id[:8], exc)
             await self._finish_if_active(
                 task_id, status="failed", message=f"下载失败：{exc}"
             )
@@ -486,10 +570,47 @@ class DownloadQueue:
             except Exception:
                 pass
 
+    async def _schedule_notify(self, task_id: str, event: str) -> None:
+        """Fire-and-forget so webhook latency never blocks download workers."""
+        task = asyncio.create_task(self._maybe_notify(task_id, event))
+        self._notify_tasks.add(task)
+
+        def _done(done: asyncio.Task) -> None:
+            self._notify_tasks.discard(done)
+            try:
+                done.result()
+            except Exception:
+                logger.exception("notify task crashed id=%s event=%s", task_id[:8], event)
+
+        task.add_done_callback(_done)
+
+    async def _maybe_notify(self, task_id: str, event: str) -> None:
+        try:
+            row = await get_task(task_id)
+            if row is None:
+                return
+            from app.notify import notify_download_event
+            from app.routes.settings import effective_settings
+
+            settings = await effective_settings()
+            await notify_download_event(settings, row, event)
+        except Exception:
+            logger.exception("notify failed id=%s event=%s", task_id[:8], event)
+
     async def _finish_if_active(self, task_id: str, *, status: str, **fields) -> None:
         changed = await update_active_task(task_id, status=status, **fields)
-        if changed:
-            await self._publish(task_id)
+        if not changed:
+            return
+        await self._publish(task_id)
+        if status in ("completed", "failed", "cancelled", "running"):
+            logger.info(
+                "task status id=%s status=%s message=%s",
+                task_id[:8],
+                status,
+                (fields.get("message") or "")[:120],
+            )
+        if status in ("completed", "failed", "cancelled"):
+            await self._schedule_notify(task_id, status)
 
     async def _publish(self, task_id: str) -> None:
         row = await get_task(task_id)

@@ -1,7 +1,10 @@
 import time
 
 import pytest
+import respx
 from fastapi.testclient import TestClient
+from httpx import Response
+
 from app.main import create_app
 
 
@@ -137,6 +140,93 @@ def test_clear_hf_token_removes_sqlite_and_env_poison(tmp_path, monkeypatch):
         assert cleared["hf_token_set"] is False
 
 
+def test_notify_webhook_settings_masked_and_validated(client):
+    headers = {"Authorization": "Bearer secret"}
+    bad = client.put(
+        "/api/settings",
+        headers=headers,
+        json={"notify_dingtalk_webhook": "https://evil.example/hook"},
+    )
+    assert bad.status_code == 400
+    ok = client.put(
+        "/api/settings",
+        headers=headers,
+        json={
+            "notify_dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=abc",
+            "notify_on_completed": True,
+            "notify_on_failed": False,
+            "notify_on_started": True,
+            "notify_on_cancelled": False,
+        },
+    )
+    assert ok.status_code == 200
+    body = ok.json()
+    assert "notify_dingtalk_webhook" not in body
+    assert body["notify_dingtalk_webhook_set"] is True
+    assert body["notify_on_completed"] is True
+    assert body["notify_on_failed"] is False
+    assert body["notify_on_started"] is True
+    assert body["notify_on_cancelled"] is False
+    cleared = client.put(
+        "/api/settings",
+        headers=headers,
+        json={"clear_notify_dingtalk_webhook": True},
+    ).json()
+    assert cleared["notify_dingtalk_webhook_set"] is False
+
+
+@respx.mock
+def test_notify_test_posts_configured_webhooks(client):
+    route = respx.post("https://oapi.dingtalk.com/robot/send").mock(
+        return_value=Response(200, json={"errcode": 0})
+    )
+    headers = {"Authorization": "Bearer secret"}
+    client.put(
+        "/api/settings",
+        headers=headers,
+        json={
+            "notify_dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=abc",
+        },
+    )
+    r = client.post(
+        "/api/settings/notify-test",
+        headers=headers,
+        json={"channel": "dingtalk"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["results"]["dingtalk"] == "ok"
+    assert route.called
+    missing = client.post(
+        "/api/settings/notify-test",
+        headers=headers,
+        json={"channel": "feishu"},
+    )
+    assert missing.status_code == 400
+
+
+@respx.mock
+def test_notify_test_accepts_unsaved_form_webhook(client):
+    route = respx.post("https://oapi.dingtalk.com/robot/send").mock(
+        return_value=Response(200, json={"errcode": 0})
+    )
+    headers = {"Authorization": "Bearer secret"}
+    r = client.post(
+        "/api/settings/notify-test",
+        headers=headers,
+        json={
+            "channel": "dingtalk",
+            "notify_dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=unsaved",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["results"]["dingtalk"] == "ok"
+    assert route.called
+    # Unsaved override must not persist into settings.
+    settings = client.get("/api/settings", headers=headers).json()
+    assert settings["notify_dingtalk_webhook_set"] is False
+
+
 def test_create_download_rejects_traversal(client):
     headers = {"Authorization": "Bearer secret"}
     r = client.post(
@@ -234,3 +324,75 @@ def test_cancel_rejects_completed(client):
     cancelled = client.post(f"/api/downloads/{tid}/cancel", headers=headers)
     assert cancelled.status_code == 400
     assert cancelled.json()["detail"]
+
+
+def test_delete_terminal_task(client):
+    headers = {"Authorization": "Bearer secret"}
+    r = client.post(
+        "/api/downloads",
+        headers=headers,
+        json={"name": "del/me", "source": "huggingface", "target": "vllm"},
+    )
+    tid = r.json()["id"]
+    row = _wait_status(client, tid, headers, "completed", "failed")
+    assert row["status"] in ("completed", "failed")
+    deleted = client.delete(f"/api/downloads/{tid}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["ok"] is True
+    missing = client.get(f"/api/downloads/{tid}", headers=headers)
+    assert missing.status_code == 404
+
+
+def test_delete_rejects_running_task(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    app = create_app()
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        started = asyncio.Event()
+
+        async def fake_run(task, on_progress, on_log, cancelled):
+            started.set()
+            await cancelled.wait()
+
+        client.app.state.queue._run_download = fake_run  # type: ignore[method-assign]
+        r = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "keep/running", "source": "huggingface", "target": "vllm"},
+        )
+        tid = r.json()["id"]
+        for _ in range(50):
+            row = client.get(f"/api/downloads/{tid}", headers=headers).json()
+            if row["status"] == "running":
+                break
+            time.sleep(0.05)
+        denied = client.delete(f"/api/downloads/{tid}", headers=headers)
+        assert denied.status_code == 400
+        client.post(f"/api/downloads/{tid}/cancel", headers=headers)
+
+
+def test_cleanup_completed_tasks(client):
+    headers = {"Authorization": "Bearer secret"}
+    ids = []
+    for name in ("c/a", "c/b"):
+        r = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": name, "source": "huggingface", "target": "vllm"},
+        )
+        tid = r.json()["id"]
+        _wait_status(client, tid, headers, "completed", "failed")
+        ids.append(tid)
+    cleaned = client.post(
+        "/api/downloads/cleanup",
+        headers=headers,
+        json={"statuses": ["completed", "failed"]},
+    )
+    assert cleaned.status_code == 200
+    assert cleaned.json()["deleted"] >= 1
+    for tid in ids:
+        assert client.get(f"/api/downloads/{tid}", headers=headers).status_code == 404
