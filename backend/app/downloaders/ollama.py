@@ -40,4 +40,4 @@ async def download_ollama(
                 if "error" in data:
                     raise RuntimeError(data["error"])
 
-    await on_log(f"Ollama pull complete for {name}")
+    await on_log(f"Ollama 拉取完成：{name}")

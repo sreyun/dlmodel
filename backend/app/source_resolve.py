@@ -18,14 +18,23 @@ async def resolve_source(
     ms_exists,
     hf_exists,
 ) -> list[str]:
+    if target == "ollama":
+        if source not in ("auto", "ollama"):
+            return [source]
+        return ["ollama"]
+
     if source != "auto":
         return [source]
 
-    if target == "ollama" and looks_like_ollama_library(name):
-        return ["ollama"]
-
+    # Prefer ModelScope when present, but always keep Hugging Face as download fallback.
+    order: list[str] = []
     if await ms_exists(name):
-        return ["modelscope"]
+        order.append("modelscope")
     if await hf_exists(name):
-        return ["huggingface"]
-    return ["modelscope", "huggingface"]
+        order.append("huggingface")
+    if not order:
+        return ["modelscope", "huggingface"]
+    for candidate in ("modelscope", "huggingface"):
+        if candidate not in order:
+            order.append(candidate)
+    return order

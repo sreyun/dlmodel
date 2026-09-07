@@ -1,7 +1,13 @@
 const TOKEN_KEY = "dlmodel_token";
 const ROUTES = ["download", "tasks", "library", "services", "settings"];
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
-const SECRET_FIELDS = new Set(["hf_token", "modelscope_api_token"]);
+const PAGE_TITLE = {
+  download: "下载模型",
+  tasks: "下载任务",
+  library: "模型库",
+  services: "推理服务",
+  settings: "设置",
+};
 
 const STATUS_LABEL = {
   queued: "排队中",
@@ -15,6 +21,8 @@ let pollTimer = null;
 let tasksInFlight = false;
 let routeGen = 0;
 let ignoreHashChange = false;
+let lastTaskFingerprint = "";
+let settingsDirty = false;
 
 function $(id) {
   return document.getElementById(id);
@@ -30,26 +38,67 @@ function setHtml(el, html) {
   return true;
 }
 
-function showFlash(targetId, kind, message) {
-  const el = $(targetId) || appRoot();
-  if (!el || !message) return;
-  const html = flash(kind, message);
-  if (targetId && $(targetId)) {
-    setHtml($(targetId), html);
-    return;
+function networkMessage(err) {
+  const raw = String(err && err.message ? err.message : err || "");
+  if (!raw || raw === "Failed to fetch" || raw.includes("NetworkError") || raw.includes("fetch")) {
+    return "网络异常，请检查服务是否已启动。";
   }
-  el.insertAdjacentHTML("afterbegin", html);
+  if (raw === "unauthorized") return "unauthorized";
+  return raw;
 }
 
 function flash(kind, message) {
-  return message ? `<div class="flash ${kind}">${esc(message)}</div>` : "";
+  return message
+    ? `<div class="flash ${kind}" role="alert">${esc(message)}</div>`
+    : "";
+}
+
+function showFlash(targetId, kind, message) {
+  if (!message) return;
+  const el = targetId ? $(targetId) : null;
+  if (el) {
+    setHtml(el, flash(kind, message));
+    return;
+  }
+  const host = $("toast-host");
+  if (!host) return;
+  const node = document.createElement("div");
+  node.innerHTML = flash(kind, message);
+  const flashEl = node.firstElementChild;
+  if (!flashEl) return;
+  host.appendChild(flashEl);
+  setTimeout(() => flashEl.remove(), 3200);
+}
+
+function clearFlash(targetId) {
+  const el = $(targetId);
+  if (el) el.innerHTML = "";
+}
+
+function pageHead(title, desc, actionsHtml = "") {
+  return `
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">MODEL HUB</div>
+        <h1>${esc(title)}</h1>
+        <p>${esc(desc)}</p>
+      </div>
+      ${actionsHtml ? `<div class="actions">${actionsHtml}</div>` : ""}
+    </div>`;
+}
+
+function btnLink(href, label, primary = false) {
+  return `<a class="btn${primary ? " primary" : ""}" href="${esc(href)}">${esc(label)}</a>`;
 }
 
 async function api(path, opts = {}) {
   const token = localStorage.getItem(TOKEN_KEY) || "";
-  const headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {}, {
+  const headers = Object.assign({}, opts.headers || {}, {
     Authorization: `Bearer ${token}`,
   });
+  if (opts.body != null && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) throw new Error("unauthorized");
   return res;
@@ -60,7 +109,11 @@ async function apiJson(path, opts = {}) {
   const text = await res.text();
   let data = null;
   if (text) {
-    try { data = JSON.parse(text); } catch { data = { detail: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: text };
+    }
   }
   if (!res.ok) throw new Error(errorMessage(data, res.statusText));
   return data;
@@ -69,19 +122,23 @@ async function apiJson(path, opts = {}) {
 function errorMessage(data, fallback) {
   const detail = data && data.detail;
   if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
+  if (Array.isArray(detail)) {
+    return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
+  }
   if (detail != null) return JSON.stringify(detail);
   return fallback || "请求失败";
 }
 
 function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[ch]));
+  return String(value ?? "").replace(/[&<>"']/g, (ch) =>
+    ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[ch],
+  );
 }
 
 function fmtBytes(n) {
@@ -133,12 +190,13 @@ function friendlyMessage(message, status) {
   if (!raw) {
     if (status === "queued") return "等待调度开始…";
     if (status === "running") return "正在准备下载…";
-    if (status === "completed") return "下载已完成";
+    if (status === "completed") return "下载已完成，可在模型库中查看。";
+    if (status === "cancelled") return "任务已取消。";
     return "";
   }
   const lower = raw.toLowerCase();
   if (lower.includes("illegal header value") && lower.includes("bearer")) {
-    return "HF Token 为空或格式无效。请到「设置」填写有效 Token，或清空无效配置后重试。";
+    return "HF Token 为空或格式无效。请到「设置」填写有效 Token，或清除无效配置后重试。";
   }
   if (lower.includes("401") || lower.includes("unauthorized")) {
     return "鉴权失败，请检查 HF / ModelScope Token。";
@@ -157,18 +215,19 @@ function taskSummary(tasks) {
   return counts;
 }
 
-
 function statusLabel(status) {
   return STATUS_LABEL[status] || status;
 }
 
 function sourceLabel(source) {
-  return ({
-    auto: "自动",
-    modelscope: "ModelScope 魔搭",
-    huggingface: "Hugging Face",
-    ollama: "Ollama",
-  })[source] || source;
+  return (
+    {
+      auto: "自动",
+      modelscope: "ModelScope 魔搭",
+      huggingface: "Hugging Face",
+      ollama: "Ollama",
+    }[source] || source
+  );
 }
 
 function targetLabel(target) {
@@ -177,9 +236,19 @@ function targetLabel(target) {
 
 function destHint(name, source, target) {
   const model = (name || "").trim();
-  if (!model) return "输入模型名称后可预览保存路径。";
-  if (target === "ollama" || source === "ollama") return `Ollama 模型库：${model}`;
-  return `保存路径预览：hf/${model}`;
+  if (!model) return "输入模型名称后可预览保存路径";
+  if (target === "ollama") return `Ollama 模型库 · ${model}`;
+  return `hf/${model}`;
+}
+
+function pairWarning(source, target) {
+  if (target === "ollama" && source !== "auto" && source !== "ollama") {
+    return "Ollama 目标仅支持「自动」或「Ollama」源。";
+  }
+  if (target === "vllm" && source === "ollama") {
+    return "vLLM 目标不支持 Ollama 源，请改用自动 / HF / 魔搭。";
+  }
+  return "";
 }
 
 function currentPage() {
@@ -204,41 +273,106 @@ function setNavVisible(visible) {
 }
 
 function markActiveNav(page) {
-  document.querySelectorAll("nav a").forEach((link) => {
-    const href = link.getAttribute("href") || "";
-    link.classList.toggle("active", href === `#/${page}`);
+  document.querySelectorAll("nav a[data-nav]").forEach((link) => {
+    const active = link.getAttribute("data-nav") === page;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   });
+  document.title = `${PAGE_TITLE[page] || "控制台"} · 模型下载管理`;
+}
+
+function setBusy(btn, busy, busyText) {
+  if (!btn) return;
+  if (busy) {
+    btn.dataset.label = btn.dataset.label || btn.textContent;
+    btn.disabled = true;
+    if (busyText) btn.textContent = busyText;
+  } else {
+    btn.disabled = false;
+    if (btn.dataset.label) btn.textContent = btn.dataset.label;
+  }
+}
+
+async function guarded(fn, opts = {}) {
+  try {
+    await fn();
+  } catch (err) {
+    const msg = networkMessage(err);
+    if (msg === "unauthorized") {
+      showLogin("登录已过期，请重新登录。");
+      return;
+    }
+    if (opts.gen != null && opts.page && !stillOn(opts.page, opts.gen)) return;
+    showFlash(opts.flashId || null, "error", msg);
+  }
 }
 
 function showLogin(message) {
   stopPoll();
   routeGen += 1;
   setNavVisible(false);
+  document.title = "登录 · 模型下载管理";
   const root = appRoot();
   if (!root) return;
-  setHtml(root, `
-    <div class="panel" style="max-width:420px;margin:48px auto;">
-      <h1>登录</h1>
-      <p class="muted">请输入管理员令牌（ADMIN_TOKEN）。令牌会保存在本浏览器的 <span class="mono">dlmodel_token</span> 中。</p>
-      ${flash("error", message)}
-      <form id="login-form">
-        <label><span>管理员令牌</span><input id="login-token" type="password" autocomplete="current-password" required></label>
-        <div class="actions"><button class="primary" type="submit">进入系统</button></div>
-      </form>
-    </div>`);
+  setHtml(
+    root,
+    `
+    <div class="login-shell">
+      <div class="login-card">
+        <section class="login-visual">
+          <div class="eyebrow" style="background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.18);color:#fff;">LOCAL MODEL OPS</div>
+          <h1>本机模型中心</h1>
+          <p>一站完成模型下载、目录管理，并挂接 vLLM / Ollama。针对国内网络做了镜像与加速默认配置。</p>
+          <ul>
+            <li>只填模型名，自动选择魔搭 / HF 镜像</li>
+            <li>任务进度、速度、ETA 一眼可见</li>
+            <li>管理端与推理服务可分离部署</li>
+          </ul>
+        </section>
+        <section class="login-form-pane">
+          <h2>管理员登录</h2>
+          <p class="lead">使用环境变量 <span class="mono">ADMIN_TOKEN</span>。令牌仅保存在本浏览器。</p>
+          ${flash("error", message)}
+          <form id="login-form">
+            <label class="field">
+              <span>管理员令牌</span>
+              <input id="login-token" name="token" type="password" autocomplete="off" required placeholder="请输入 ADMIN_TOKEN">
+            </label>
+            <div class="actions mt">
+              <button class="primary" id="login-submit" type="submit">进入控制台</button>
+              <button type="button" id="toggle-token" class="ghost">显示</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>`,
+  );
+  const tokenInput = $("login-token");
+  if (tokenInput) tokenInput.focus();
+  const toggle = $("toggle-token");
+  if (toggle && tokenInput) {
+    toggle.addEventListener("click", () => {
+      const show = tokenInput.type === "password";
+      tokenInput.type = show ? "text" : "password";
+      toggle.textContent = show ? "隐藏" : "显示";
+    });
+  }
   const form = $("login-form");
   if (!form) return;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = $("login-token");
+    const submit = $("login-submit");
     if (!input) return;
     localStorage.setItem(TOKEN_KEY, input.value.trim());
+    setBusy(submit, true, "验证中…");
     try {
       await apiJson("/api/auth/verify", { method: "POST" });
       await showApp();
     } catch (err) {
       localStorage.removeItem(TOKEN_KEY);
-      showLogin(err.message === "unauthorized" ? "令牌无效" : err.message);
+      showLogin(err.message === "unauthorized" ? "令牌无效，请重试" : networkMessage(err));
     }
   });
 }
@@ -255,66 +389,106 @@ async function verifySession() {
   }
 }
 
-async function guarded(fn, opts = {}) {
-  try {
-    await fn();
-  } catch (err) {
-    if (err.message === "unauthorized") {
-      showLogin("登录已过期，请重新登录。");
-      return;
-    }
-    if (opts.gen != null && opts.page && !stillOn(opts.page, opts.gen)) return;
-    showFlash(opts.flashId || null, "error", err.message);
-  }
-}
-
 function renderDownload(gen) {
   const root = appRoot();
   if (!root) return;
-  setHtml(root, `
-    <div class="page-head">
-      <div>
-        <h1>下载模型</h1>
-        <p>填写模型名即可开始。推荐源选「自动」，国内优先魔搭并回落 HF 镜像。</p>
-      </div>
-    </div>
-    <div id="dl-msg"></div>
+  setHtml(
+    root,
+    `
+    ${pageHead(
+      "下载模型",
+      "填写模型名即可开始。推荐源选「自动」：国内优先魔搭，失败后回落 HF 镜像。",
+      btnLink("#/tasks", "查看任务"),
+    )}
+    <div id="dl-msg" aria-live="polite"></div>
     <div class="panel">
+      <div class="panel-title">
+        <div>
+          <h2>新建下载任务</h2>
+          <p>支持 Hugging Face、ModelScope、Ollama；目标可落盘到 vLLM 或 Ollama。</p>
+        </div>
+      </div>
       <form id="dl-form">
-        <label><span>模型名称</span><input id="name" required placeholder="Qwen/Qwen2.5-7B-Instruct 或 llama3.2"></label>
-        <label><span>下载源</span>
-          <select id="source">
-            <option value="auto">自动（优先魔搭，回落 HF）</option>
-            <option value="modelscope">ModelScope 魔搭</option>
-            <option value="huggingface">Hugging Face</option>
-            <option value="ollama">Ollama</option>
-          </select>
-        </label>
-        <label><span>目标用途</span>
-          <select id="target">
-            <option value="vllm">vLLM（HF 目录布局）</option>
-            <option value="ollama">Ollama</option>
-          </select>
-        </label>
-        <label><span>版本 / Revision（可选）</span><input id="revision" placeholder="main"></label>
-        <p class="hint" id="dest-hint">${esc(destHint("", "auto", "vllm"))}</p>
-        <div class="actions"><button class="primary" type="submit">开始下载</button></div>
+        <div class="form-grid">
+          <label class="field full">
+            <span>模型名称</span>
+            <input id="name" required aria-describedby="dest-hint" placeholder="例如 Qwen/Qwen2.5-7B-Instruct 或 llama3.2">
+          </label>
+          <div class="full">
+            <fieldset class="choice-set">
+              <legend>下载源</legend>
+              <div class="choice-grid" id="source-choices">
+                <label class="choice"><input type="radio" name="source" value="auto" checked><strong>自动</strong><span>优先魔搭，回落 HF 镜像</span></label>
+                <label class="choice"><input type="radio" name="source" value="modelscope"><strong>ModelScope</strong><span>魔搭社区直连</span></label>
+                <label class="choice"><input type="radio" name="source" value="huggingface"><strong>Hugging Face</strong><span>走国内镜像加速</span></label>
+                <label class="choice"><input type="radio" name="source" value="ollama"><strong>Ollama</strong><span>官方库 pull</span></label>
+              </div>
+            </fieldset>
+          </div>
+          <div class="full">
+            <fieldset class="choice-set">
+              <legend>目标用途</legend>
+              <div class="choice-grid" id="target-choices">
+                <label class="choice"><input type="radio" name="target" value="vllm" checked><strong>vLLM</strong><span>保存为 HF 目录布局</span></label>
+                <label class="choice"><input type="radio" name="target" value="ollama"><strong>Ollama</strong><span>写入 Ollama 模型目录</span></label>
+              </div>
+            </fieldset>
+            <div id="pair-warn" class="pair-warn" hidden></div>
+          </div>
+          <label class="field">
+            <span>版本 / Revision（可选）</span>
+            <input id="revision" placeholder="main">
+          </label>
+          <div class="field">
+            <span class="muted" style="display:block;margin-bottom:6px;font-size:.84rem;font-weight:560;">保存路径预览</span>
+            <div class="path-preview" id="dest-hint">${esc(destHint("", "auto", "vllm"))}</div>
+          </div>
+        </div>
+        <div class="actions mt">
+          <button class="primary" id="dl-submit" type="submit">开始下载</button>
+          <button type="button" id="dl-reset">清空</button>
+        </div>
       </form>
-    </div>`);
+    </div>`,
+  );
+
+  const selected = (name) => {
+    const el = document.querySelector(`input[name="${name}"]:checked`);
+    return el ? el.value : name === "source" ? "auto" : "vllm";
+  };
 
   const updateHint = () => {
     const hint = $("dest-hint");
     const name = $("name");
-    const source = $("source");
-    const target = $("target");
-    if (!hint || !name || !source || !target) return;
-    hint.textContent = destHint(name.value, source.value, target.value);
+    const warn = $("pair-warn");
+    const submit = $("dl-submit");
+    if (!hint || !name) return;
+    const source = selected("source");
+    const target = selected("target");
+    hint.textContent = destHint(name.value, source, target);
+    const warning = pairWarning(source, target);
+    if (warn) {
+      warn.hidden = !warning;
+      warn.textContent = warning;
+    }
+    if (submit) submit.disabled = Boolean(warning);
   };
-  ["name", "source", "target"].forEach((id) => {
+
+  ["name", "source-choices", "target-choices"].forEach((id) => {
     const el = $(id);
-    if (el) el.addEventListener("input", updateHint);
-    if (el) el.addEventListener("change", updateHint);
+    if (!el) return;
+    el.addEventListener("input", updateHint);
+    el.addEventListener("change", updateHint);
   });
+
+  const resetBtn = $("dl-reset");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      const form = $("dl-form");
+      if (form) form.reset();
+      updateHint();
+    });
+  }
 
   const form = $("dl-form");
   if (!form) return;
@@ -322,22 +496,30 @@ function renderDownload(gen) {
     event.preventDefault();
     if (!stillOn("download", gen)) return;
     const nameEl = $("name");
-    const sourceEl = $("source");
-    const targetEl = $("target");
     const revisionEl = $("revision");
-    if (!nameEl || !sourceEl || !targetEl) return;
+    const submit = $("dl-submit");
+    if (!nameEl || (submit && submit.disabled)) return;
     const body = {
       name: nameEl.value.trim(),
-      source: sourceEl.value,
-      target: targetEl.value,
+      source: selected("source"),
+      target: selected("target"),
     };
     const revision = revisionEl ? revisionEl.value.trim() : "";
     if (revision) body.revision = revision;
-    await guarded(async () => {
-      const created = await apiJson("/api/downloads", { method: "POST", body: JSON.stringify(body) });
-      sessionStorage.setItem("dlmodel_flash", `已加入队列：${created.id}`);
-      location.hash = "#/tasks";
-    }, { gen, page: "download", flashId: "dl-msg" });
+    setBusy(submit, true, "提交中…");
+    await guarded(
+      async () => {
+        const created = await apiJson("/api/downloads", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const shortId = created && created.id ? `${String(created.id).slice(0, 8)}…` : "";
+        sessionStorage.setItem("dlmodel_flash", shortId ? `已加入队列：${shortId}` : "已加入队列");
+        location.hash = "#/tasks";
+      },
+      { gen, page: "download", flashId: "dl-msg" },
+    );
+    if (stillOn("download", gen)) setBusy(submit, false);
   });
 }
 
@@ -351,11 +533,17 @@ function taskCard(task) {
     "progress-fill",
     task.status === "completed" ? "done" : "",
     task.status === "failed" ? "failed" : "",
-    (task.status === "running" || task.status === "queued") && pct == null ? "indeterminate" : "",
-  ].filter(Boolean).join(" ");
-  const width = pct == null
-    ? (task.status === "failed" || task.status === "completed" ? 100 : 35)
-    : pct;
+    task.status === "cancelled" ? "cancelled" : "",
+    (task.status === "running" || task.status === "queued") && pct == null
+      ? "indeterminate"
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  let width = 0;
+  if (task.status === "cancelled") width = 100;
+  else if (pct == null) width = task.status === "failed" || task.status === "completed" ? 100 : 35;
+  else width = pct;
   return `<article class="task-card ${task.status === "running" ? "is-running" : ""}" data-id="${esc(task.id)}">
     <div class="task-top">
       <div>
@@ -367,8 +555,8 @@ function taskCard(task) {
         </div>
       </div>
       <div class="task-actions">
-        <button data-act="cancel" data-id="${esc(task.id)}" ${canCancel ? "" : "disabled"}>取消</button>
-        <button class="primary" data-act="retry" data-id="${esc(task.id)}" ${canRetry ? "" : "disabled"}>重试</button>
+        ${canCancel ? `<button data-act="cancel" data-id="${esc(task.id)}">取消</button>` : ""}
+        ${canRetry ? `<button class="primary" data-act="retry" data-id="${esc(task.id)}">重试</button>` : ""}
       </div>
     </div>
     <div class="progress-block">
@@ -382,6 +570,15 @@ function taskCard(task) {
   </article>`;
 }
 
+function tasksFingerprint(tasks) {
+  return tasks
+    .map(
+      (t) =>
+        `${t.id}:${t.status}:${t.progress_bytes}:${t.total_bytes}:${t.speed_bps}:${t.message}`,
+    )
+    .join("|");
+}
+
 async function refreshTasks(gen) {
   if (tasksInFlight || !stillOn("tasks", gen ?? routeGen)) return;
   tasksInFlight = true;
@@ -389,31 +586,58 @@ async function refreshTasks(gen) {
   try {
     const tasks = await apiJson("/api/downloads");
     if (!stillOn("tasks", myGen)) return;
+    clearFlash("task-error");
     const counts = taskSummary(tasks);
     const stats = $("task-stats");
     if (stats) {
-      setHtml(stats, `
+      setHtml(
+        stats,
+        `
         <div class="stat"><div class="label">进行中</div><div class="value">${counts.running}</div></div>
         <div class="stat"><div class="label">排队中</div><div class="value">${counts.queued}</div></div>
         <div class="stat"><div class="label">已完成</div><div class="value">${counts.completed}</div></div>
-        <div class="stat"><div class="label">失败</div><div class="value">${counts.failed}</div></div>
-      `);
+        <div class="stat"><div class="label">失败 / 取消</div><div class="value">${counts.failed + counts.cancelled}</div></div>
+      `,
+      );
+    }
+    const stamp = $("task-updated");
+    if (stamp) {
+      const now = new Date();
+      stamp.textContent = `更新于 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
     }
     const body = $("task-list");
     if (!body) return;
-    setHtml(
-      body,
-      tasks.length
-        ? tasks.map(taskCard).join("")
-        : `<div class="empty">暂无下载任务。去「下载」页提交第一个模型吧。</div>`,
+    const nextFp = tasksFingerprint(tasks);
+    const active = document.activeElement;
+    const focusAct = active && active.getAttribute ? active.getAttribute("data-act") : null;
+    const focusId = active && active.getAttribute ? active.getAttribute("data-id") : null;
+    if (nextFp !== lastTaskFingerprint) {
+      lastTaskFingerprint = nextFp;
+      setHtml(
+        body,
+        tasks.length
+          ? tasks.map(taskCard).join("")
+          : `<div class="empty"><strong>还没有下载任务</strong>去「下载」页提交第一个模型，进度会实时出现在这里。</div>`,
+      );
+      if (focusAct && focusId) {
+        const btn = body.querySelector(`button[data-act="${focusAct}"][data-id="${focusId}"]`);
+        if (btn) btn.focus();
+      }
+    }
+    const activeCount = counts.running + counts.queued;
+    stopPoll();
+    pollTimer = setInterval(
+      () => refreshTasks(myGen),
+      activeCount > 0 ? 1000 : 4000,
     );
   } catch (err) {
-    if (err.message === "unauthorized") {
+    const msg = networkMessage(err);
+    if (msg === "unauthorized") {
       showLogin("登录已过期，请重新登录。");
       return;
     }
     if (!stillOn("tasks", myGen)) return;
-    showFlash("task-error", "error", err.message);
+    showFlash("task-error", "error", msg);
   } finally {
     tasksInFlight = false;
   }
@@ -422,28 +646,29 @@ async function refreshTasks(gen) {
 function renderTasks(gen) {
   const root = appRoot();
   if (!root) return;
+  lastTaskFingerprint = "";
   const pending = sessionStorage.getItem("dlmodel_flash");
   if (pending) sessionStorage.removeItem("dlmodel_flash");
-  setHtml(root, `
-    <div class="page-head">
-      <div>
-        <h1>下载任务</h1>
-        <p>实时查看进度、速度与剩余时间。失败任务可一键重试。</p>
-      </div>
-      <div class="actions">
-        <a href="#/download"><button class="primary" type="button">新建下载</button></a>
-      </div>
-    </div>
-    <div id="task-error">${pending ? flash("ok", pending) : ""}</div>
+  setHtml(
+    root,
+    `
+    ${pageHead(
+      "下载任务",
+      "实时查看进度、速度与剩余时间。失败或已取消的任务可一键重试。",
+      btnLink("#/download", "新建下载", true),
+    )}
+    <div id="task-error" aria-live="polite">${pending ? flash("ok", pending) : ""}</div>
+    <p class="task-updated" id="task-updated">正在同步…</p>
     <div class="stats" id="task-stats">
       <div class="stat"><div class="label">进行中</div><div class="value">—</div></div>
       <div class="stat"><div class="label">排队中</div><div class="value">—</div></div>
       <div class="stat"><div class="label">已完成</div><div class="value">—</div></div>
-      <div class="stat"><div class="label">失败</div><div class="value">—</div></div>
+      <div class="stat"><div class="label">失败 / 取消</div><div class="value">—</div></div>
     </div>
-    <div id="task-list" class="task-list">
-      <div class="empty">加载中…</div>
-    </div>`);
+    <div id="task-list" class="task-list" aria-live="polite">
+      <div class="empty"><div class="skeleton" style="width:40%;margin:0 auto 10px;"></div>加载中…</div>
+    </div>`,
+  );
 
   const list = $("task-list");
   if (list) {
@@ -452,146 +677,273 @@ function renderTasks(gen) {
       if (!btn || btn.disabled || !stillOn("tasks", gen)) return;
       const id = btn.getAttribute("data-id");
       const act = btn.getAttribute("data-act");
-      await guarded(async () => {
-        await apiJson(`/api/downloads/${encodeURIComponent(id)}/${act}`, { method: "POST" });
-        await refreshTasks(gen);
-      }, { gen, page: "tasks", flashId: "task-error" });
+      if (act === "cancel") {
+        if (!confirm("确认取消该下载任务？进行中的传输将被中断。")) return;
+      }
+      setBusy(btn, true, act === "cancel" ? "取消中…" : "重试中…");
+      await guarded(
+        async () => {
+          await apiJson(`/api/downloads/${encodeURIComponent(id)}/${act}`, {
+            method: "POST",
+          });
+          lastTaskFingerprint = "";
+          await refreshTasks(gen);
+        },
+        { gen, page: "tasks", flashId: "task-error" },
+      );
     });
   }
 
   refreshTasks(gen);
-  stopPoll();
-  pollTimer = setInterval(() => refreshTasks(gen), 1000);
+}
+
+function modelCard(m) {
+  const shortId = String(m.id || "").length > 24 ? `${String(m.id).slice(0, 18)}…` : m.id;
+  return `<article class="model-card" data-id="${esc(m.id)}">
+    <div class="model-top">
+      <div>
+        <div class="model-title">${esc(m.name)}</div>
+        <div class="chip-row">
+          <span class="chip">${esc(targetLabel(m.target))}</span>
+          <span class="chip">${esc(fmtBytes(m.size_bytes))}</span>
+          <span class="chip mono" title="${esc(m.id)}">${esc(shortId)}</span>
+        </div>
+        <div class="model-path">${esc(m.path)}</div>
+      </div>
+      <div class="model-actions">
+        <button type="button" data-copy="${esc(m.path)}">复制路径</button>
+        <button class="danger" data-del="${esc(m.id)}" data-name="${esc(m.name)}">删除</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const box = document.createElement("textarea");
+      box.value = text;
+      document.body.appendChild(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 }
 
 function renderLibrary(gen) {
   const root = appRoot();
   if (!root) return;
-  setHtml(root, `
-    <h1>模型库</h1>
-    <div id="lib-msg"></div>
-    <div class="panel">
-      <table>
-        <thead>
-          <tr><th>名称</th><th>路径</th><th>大小</th><th>用途</th><th>操作</th></tr>
-        </thead>
-        <tbody id="lib-body">
-          <tr><td colspan="5" class="empty">加载中…</td></tr>
-        </tbody>
-      </table>
-    </div>`);
+  setHtml(
+    root,
+    `
+    ${pageHead(
+      "模型库",
+      "浏览本机已下载的 HF 布局权重，核对路径与占用空间，按需清理。",
+      `${btnLink("#/download", "去下载", true)}<button type="button" id="lib-refresh">刷新</button>`,
+    )}
+    <div id="lib-msg" aria-live="polite"></div>
+    <div id="lib-stats" class="stats" style="grid-template-columns:repeat(2,minmax(0,1fr));">
+      <div class="stat"><div class="label">模型数量</div><div class="value">—</div></div>
+      <div class="stat"><div class="label">总占用</div><div class="value">—</div></div>
+    </div>
+    <div id="lib-body" class="model-list">
+      <div class="empty"><div class="skeleton" style="width:40%;margin:0 auto 10px;"></div>加载中…</div>
+    </div>`,
+  );
 
   const load = async () => {
-    await guarded(async () => {
-      const models = await apiJson("/api/models");
-      if (!stillOn("library", gen)) return;
-      const body = $("lib-body");
-      if (!body) return;
-      setHtml(
-        body,
-        models.length
-          ? models.map((m) => `<tr>
-              <td>${esc(m.name)}<div class="muted mono">${esc(m.id)}</div></td>
-              <td class="mono">${esc(m.path)}</td>
-              <td>${esc(fmtBytes(m.size_bytes))}</td>
-              <td>${esc(targetLabel(m.target))}</td>
-              <td><button class="danger" data-del="${esc(m.id)}">删除</button></td>
-            </tr>`).join("")
-          : `<tr><td colspan="5" class="empty">磁盘上还没有已下载模型。</td></tr>`,
-      );
-    }, { gen, page: "library", flashId: "lib-msg" });
+    await guarded(
+      async () => {
+        const models = await apiJson("/api/models");
+        if (!stillOn("library", gen)) return;
+        const total = models.reduce((sum, m) => sum + (Number(m.size_bytes) || 0), 0);
+        const stats = $("lib-stats");
+        if (stats) {
+          setHtml(
+            stats,
+            `
+          <div class="stat"><div class="label">模型数量</div><div class="value">${models.length}</div></div>
+          <div class="stat"><div class="label">总占用</div><div class="value">${esc(fmtBytes(total))}</div></div>
+        `,
+          );
+        }
+        const body = $("lib-body");
+        if (!body) return;
+        setHtml(
+          body,
+          models.length
+            ? models.map(modelCard).join("")
+            : `<div class="empty"><strong>磁盘上还没有 HF 模型</strong>下载到 vLLM 目标后会出现在这里。Ollama 模型请到「服务」页查看。</div>`,
+        );
+      },
+      { gen, page: "library", flashId: "lib-msg" },
+    );
   };
+
+  const refresh = $("lib-refresh");
+  if (refresh) refresh.addEventListener("click", () => load());
 
   const body = $("lib-body");
   if (body) {
     body.addEventListener("click", async (event) => {
+      const copyBtn = event.target.closest("button[data-copy]");
+      if (copyBtn && stillOn("library", gen)) {
+        const ok = await copyText(copyBtn.getAttribute("data-copy") || "");
+        showFlash("lib-msg", ok ? "ok" : "error", ok ? "路径已复制" : "复制失败");
+        return;
+      }
       const btn = event.target.closest("button[data-del]");
       if (!btn || !stillOn("library", gen)) return;
       const id = btn.getAttribute("data-del");
-      if (!confirm(`确认删除 ${id}？此操作不可恢复。`)) return;
-      await guarded(async () => {
-        await apiJson(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
-        if (!stillOn("library", gen)) return;
-        showFlash("lib-msg", "ok", `已删除 ${id}`);
-        await load();
-      }, { gen, page: "library", flashId: "lib-msg" });
+      const name = btn.getAttribute("data-name") || id;
+      if (!confirm(`确认删除「${name}」？\n${id}\n此操作不可恢复。`)) return;
+      setBusy(btn, true, "删除中…");
+      await guarded(
+        async () => {
+          await apiJson(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (!stillOn("library", gen)) return;
+          showFlash("lib-msg", "ok", `已删除 ${name}`);
+          await load();
+        },
+        { gen, page: "library", flashId: "lib-msg" },
+      );
     });
   }
 
   load();
 }
 
-function healthBadge(health) {
-  if (!health) return `<span class="muted">未知</span>`;
+function healthChip(health, loading = false) {
+  if (loading) return `<span class="chip">检查中…</span>`;
+  if (!health) return `<span class="chip">状态未知</span>`;
   return health.ok
-    ? `<span class="status completed">已连接</span> <span class="muted">${esc(health.detail || "")}</span>`
-    : `<span class="status failed">不可达</span> <span class="muted">${esc(health.detail || "")}</span>`;
+    ? `<span class="chip ok">已连接 · ${esc(health.detail || "正常")}</span>`
+    : `<span class="chip down">不可达 · ${esc(health.detail || "请检查地址")}</span>`;
 }
 
 function renderServices(gen) {
   const root = appRoot();
   if (!root) return;
-  setHtml(root, `
-    <h1>推理服务</h1>
-    <div class="row">
-      <div class="panel">
-        <h2>Ollama</h2>
-        <p id="ollama-health" class="muted">检查中…</p>
-        <form id="ollama-pull" class="actions">
-          <input id="ollama-name" placeholder="llama3.2" required style="max-width:240px">
-          <button class="primary" type="submit">拉取</button>
-          <button type="button" id="ollama-refresh">刷新</button>
-        </form>
-        <div id="ollama-msg"></div>
-        <table>
-          <thead><tr><th>名称</th><th>大小</th></tr></thead>
-          <tbody id="ollama-models"><tr><td colspan="2" class="empty">加载中…</td></tr></tbody>
-        </table>
-      </div>
-      <div class="panel">
-        <h2>vLLM</h2>
-        <p id="vllm-health" class="muted">检查中…</p>
-        <form id="vllm-form">
-          <label><span>模型路径</span><input id="vllm-model" required placeholder="/models/hf/Qwen/Qwen2.5-7B-Instruct"></label>
-          <label><span>端口</span><input id="vllm-port" type="number" value="8000" min="1"></label>
-          <div class="actions">
-            <button class="primary" type="submit">生成启动命令</button>
-            <button type="button" id="copy-cmd" disabled>复制</button>
-            <button type="button" id="vllm-refresh">刷新状态</button>
+  setHtml(
+    root,
+    `
+    ${pageHead("推理服务", "检查 Ollama / vLLM 连通性，拉取模型或复制启动命令。管理端与推理端可分离。")}
+    <div class="service-grid">
+      <section class="service-card">
+        <div class="service-top">
+          <div>
+            <h2>Ollama</h2>
+            <p class="lead">适合本地对话与快速试跑。</p>
           </div>
-        </form>
-        <p id="vllm-cmd" class="mono cmd hint"></p>
-        <div id="vllm-msg"></div>
-      </div>
-    </div>`);
+          <div id="ollama-health">${healthChip(null, true)}</div>
+        </div>
+        <div class="service-body">
+          <form id="ollama-pull" class="actions">
+            <label class="field" style="flex:1;min-width:160px;margin:0;">
+              <span>模型名称</span>
+              <input id="ollama-name" placeholder="llama3.2" required>
+            </label>
+            <button class="primary" id="ollama-submit" type="submit">拉取</button>
+            <button type="button" id="ollama-refresh">刷新</button>
+          </form>
+          <div id="ollama-msg" aria-live="polite"></div>
+          <div id="ollama-models" class="model-list" style="margin-top:14px;">
+            <div class="empty"><div class="skeleton" style="width:40%;margin:0 auto 10px;"></div>加载中…</div>
+          </div>
+        </div>
+      </section>
+      <section class="service-card">
+        <div class="service-top">
+          <div>
+            <h2>vLLM</h2>
+            <p class="lead">高性能推理；生成可复制的启动命令。</p>
+          </div>
+          <div id="vllm-health">${healthChip(null, true)}</div>
+        </div>
+        <div class="service-body">
+          <form id="vllm-form" class="form-grid">
+            <label class="field full">
+              <span>模型路径</span>
+              <input id="vllm-model" required list="lib-paths" placeholder="/models/hf/Qwen/Qwen2.5-7B-Instruct">
+              <datalist id="lib-paths"></datalist>
+            </label>
+            <label class="field">
+              <span>端口</span>
+              <input id="vllm-port" type="number" value="8000" min="1" max="65535" required>
+            </label>
+            <div class="actions" style="align-items:end;">
+              <button class="primary" id="vllm-submit" type="submit">生成命令</button>
+              <button type="button" id="copy-cmd" disabled>复制</button>
+              <button type="button" id="vllm-refresh">刷新状态</button>
+            </div>
+          </form>
+          <div class="cmd-box" id="vllm-cmd" tabindex="0">生成后将显示启动命令</div>
+          <div id="vllm-msg" aria-live="polite"></div>
+        </div>
+      </section>
+    </div>`,
+  );
+
+  const hydrateLibraryPaths = async () => {
+    try {
+      const models = await apiJson("/api/models");
+      const list = $("lib-paths");
+      if (!list || !stillOn("services", gen)) return;
+      list.innerHTML = models
+        .map((m) => `<option value="${esc(m.path)}"></option>`)
+        .join("");
+    } catch {
+      /* optional */
+    }
+  };
 
   const loadOllama = async () => {
-    await guarded(async () => {
-      const health = await apiJson("/api/services/ollama/health");
-      if (!stillOn("services", gen)) return;
-      setHtml($("ollama-health"), healthBadge(health));
-      try {
-        const models = await apiJson("/api/services/ollama/models");
+    setHtml($("ollama-health"), healthChip(null, true));
+    await guarded(
+      async () => {
+        const health = await apiJson("/api/services/ollama/health");
         if (!stillOn("services", gen)) return;
-        setHtml(
-          $("ollama-models"),
-          models.length
-            ? models.map((m) => `<tr><td>${esc(m.name || m.model || "")}</td><td>${esc(fmtBytes(m.size))}</td></tr>`).join("")
-            : `<tr><td colspan="2" class="empty">暂无 Ollama 模型。</td></tr>`,
-        );
-      } catch (err) {
-        if (!stillOn("services", gen)) return;
-        setHtml($("ollama-models"), `<tr><td colspan="2" class="empty">${esc(err.message)}</td></tr>`);
-      }
-    }, { gen, page: "services", flashId: "ollama-msg" });
+        setHtml($("ollama-health"), healthChip(health));
+        try {
+          const models = await apiJson("/api/services/ollama/models");
+          if (!stillOn("services", gen)) return;
+          setHtml(
+            $("ollama-models"),
+            models.length
+              ? models
+                  .map(
+                    (m) =>
+                      `<div class="model-card"><div class="model-title">${esc(m.name || m.model || "")}</div><div class="chip-row"><span class="chip">${esc(fmtBytes(m.size))}</span></div></div>`,
+                  )
+                  .join("")
+              : `<div class="empty"><strong>暂无 Ollama 模型</strong>可在上方输入名称后拉取。</div>`,
+          );
+        } catch (err) {
+          if (!stillOn("services", gen)) return;
+          setHtml($("ollama-models"), `<div class="empty">${esc(networkMessage(err))}</div>`);
+        }
+      },
+      { gen, page: "services", flashId: "ollama-msg" },
+    );
   };
 
   const loadVllm = async () => {
-    await guarded(async () => {
-      const health = await apiJson("/api/services/vllm/health");
-      if (!stillOn("services", gen)) return;
-      setHtml($("vllm-health"), healthBadge(health));
-    }, { gen, page: "services", flashId: "vllm-msg" });
+    setHtml($("vllm-health"), healthChip(null, true));
+    await guarded(
+      async () => {
+        const health = await apiJson("/api/services/vllm/health");
+        if (!stillOn("services", gen)) return;
+        setHtml($("vllm-health"), healthChip(health));
+      },
+      { gen, page: "services", flashId: "vllm-msg" },
+    );
   };
 
   const ollamaRefresh = $("ollama-refresh");
@@ -605,15 +957,25 @@ function renderServices(gen) {
       event.preventDefault();
       if (!stillOn("services", gen)) return;
       const nameEl = $("ollama-name");
+      const submit = $("ollama-submit");
       if (!nameEl) return;
       const name = nameEl.value.trim();
-      showFlash("ollama-msg", "", `正在拉取 ${name}…`);
-      await guarded(async () => {
-        await apiJson("/api/services/ollama/pull", { method: "POST", body: JSON.stringify({ name }) });
-        if (!stillOn("services", gen)) return;
-        showFlash("ollama-msg", "ok", `已拉取 ${name}`);
-        await loadOllama();
-      }, { gen, page: "services", flashId: "ollama-msg" });
+      setBusy(submit, true, "拉取中…");
+      showFlash("ollama-msg", "info", `正在拉取 ${name}，大模型可能需要较长时间…`);
+      await guarded(
+        async () => {
+          await apiJson("/api/services/ollama/pull", {
+            method: "POST",
+            body: JSON.stringify({ name }),
+          });
+          if (!stillOn("services", gen)) return;
+          nameEl.value = "";
+          showFlash("ollama-msg", "ok", `已拉取 ${name}`);
+          await loadOllama();
+        },
+        { gen, page: "services", flashId: "ollama-msg" },
+      );
+      if (stillOn("services", gen)) setBusy(submit, false);
     });
   }
 
@@ -624,21 +986,33 @@ function renderServices(gen) {
       if (!stillOn("services", gen)) return;
       const modelEl = $("vllm-model");
       const portEl = $("vllm-port");
+      const submit = $("vllm-submit");
       if (!modelEl) return;
       const model = modelEl.value.trim();
-      const port = (portEl && portEl.value) || "8000";
-      await guarded(async () => {
-        const qs = new URLSearchParams({ model, port });
-        const data = await apiJson(`/api/services/vllm/launch-command?${qs}`);
-        if (!stillOn("services", gen)) return;
-        const cmdEl = $("vllm-cmd");
-        const copyBtn = $("copy-cmd");
-        if (cmdEl) cmdEl.textContent = data.command || "";
-        if (copyBtn) {
-          copyBtn.disabled = !data.command;
-          copyBtn.dataset.cmd = data.command || "";
-        }
-      }, { gen, page: "services", flashId: "vllm-msg" });
+      const port = Number((portEl && portEl.value) || "8000");
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        showFlash("vllm-msg", "error", "端口需为 1–65535 的整数。");
+        return;
+      }
+      setBusy(submit, true, "生成中…");
+      await guarded(
+        async () => {
+          const qs = new URLSearchParams({ model, port: String(port) });
+          const data = await apiJson(`/api/services/vllm/launch-command?${qs}`);
+          if (!stillOn("services", gen)) return;
+          const cmdEl = $("vllm-cmd");
+          const copyBtn = $("copy-cmd");
+          if (cmdEl) cmdEl.textContent = data.command || "未能生成命令";
+          if (copyBtn) {
+            copyBtn.disabled = !data.command;
+            copyBtn.dataset.cmd = data.command || "";
+            copyBtn.textContent = "复制";
+          }
+          showFlash("vllm-msg", "ok", "启动命令已生成");
+        },
+        { gen, page: "services", flashId: "vllm-msg" },
+      );
+      if (stillOn("services", gen)) setBusy(submit, false);
     });
   }
 
@@ -647,20 +1021,16 @@ function renderServices(gen) {
     copyBtn.addEventListener("click", async () => {
       const cmd = copyBtn.dataset.cmd || "";
       if (!cmd || !stillOn("services", gen)) return;
-      try {
-        await navigator.clipboard.writeText(cmd);
-      } catch {
-        const box = document.createElement("textarea");
-        box.value = cmd;
-        document.body.appendChild(box);
-        box.select();
-        document.execCommand("copy");
-        box.remove();
-      }
-      showFlash("vllm-msg", "ok", "启动命令已复制");
+      const ok = await copyText(cmd);
+      copyBtn.textContent = ok ? "已复制" : "复制失败";
+      showFlash("vllm-msg", ok ? "ok" : "error", ok ? "启动命令已复制到剪贴板" : "复制失败，请手动选择命令框内容");
+      setTimeout(() => {
+        if (stillOn("services", gen)) copyBtn.textContent = "复制";
+      }, 2000);
     });
   }
 
+  hydrateLibraryPaths();
   loadOllama();
   loadVllm();
 }
@@ -668,32 +1038,57 @@ function renderServices(gen) {
 function renderSettings(gen) {
   const root = appRoot();
   if (!root) return;
-  setHtml(root, `
-    <h1>设置</h1>
-    <div id="set-msg"></div>
-    <div class="panel">
-      <form id="set-form">
-        <p id="set-loading" class="muted">正在加载当前配置…</p>
-        <label><span>Hugging Face 镜像地址</span><input id="hf_endpoint" autocomplete="off"></label>
-        <label>
-          <span>HF Token（留空表示不修改）</span>
-          <input id="hf_token" type="password" autocomplete="new-password" placeholder="未修改">
-          <span id="hf_token_hint" class="hint"></span>
-        </label>
-        <label>
-          <span>ModelScope Token（留空表示不修改）</span>
-          <input id="modelscope_api_token" type="password" autocomplete="new-password" placeholder="未修改">
-          <span id="ms_token_hint" class="hint"></span>
-        </label>
-        <label><span>下载并发任务数</span><input id="download_concurrency" type="number" min="1" step="1"></label>
-        <label><span>aria2 单文件连接数</span><input id="aria2_connections" type="number" min="1" step="1"></label>
-        <label><span>Ollama 服务地址</span><input id="ollama_base_url" autocomplete="off"></label>
-        <label><span>vLLM 服务地址</span><input id="vllm_base_url" autocomplete="off"></label>
-        <div class="actions">
-          <button class="primary" id="set-save" type="submit" disabled>保存设置</button>
+  settingsDirty = false;
+  setHtml(
+    root,
+    `
+    ${pageHead("设置", "配置镜像、鉴权、并发与推理地址。空 Token 不会覆盖已有密钥；可显式清除。")}
+    <div id="set-msg" aria-live="polite"></div>
+    <form id="set-form" class="settings-sections">
+      <p id="set-loading" class="panel muted">正在加载当前配置…</p>
+      <fieldset id="set-fields" disabled class="settings-sections" style="border:0;padding:0;margin:0;">
+      <section class="panel section-card">
+        <h3>镜像与鉴权</h3>
+        <p class="lead">国内默认走 hf-mirror；Token 仅在填写新值时更新。</p>
+        <div class="form-grid">
+          <label class="field full"><span>Hugging Face 镜像地址</span><input id="hf_endpoint" autocomplete="off" required></label>
+          <label class="field">
+            <span>HF Token（留空表示不修改）</span>
+            <input id="hf_token" type="password" autocomplete="new-password" placeholder="未修改">
+            <span id="hf_token_hint" class="hint"></span>
+            <label class="checkbox-row"><input type="checkbox" id="clear_hf_token"> 清除已保存的 HF Token</label>
+          </label>
+          <label class="field">
+            <span>ModelScope Token（留空表示不修改）</span>
+            <input id="modelscope_api_token" type="password" autocomplete="new-password" placeholder="未修改">
+            <span id="ms_token_hint" class="hint"></span>
+            <label class="checkbox-row"><input type="checkbox" id="clear_modelscope_api_token"> 清除已保存的 ModelScope Token</label>
+          </label>
         </div>
-      </form>
-    </div>`);
+      </section>
+      <section class="panel section-card">
+        <h3>下载加速</h3>
+        <p class="lead">控制任务并发与 aria2 单文件连接数。并发变更会立即调整工作线程。</p>
+        <div class="form-grid">
+          <label class="field"><span>下载并发任务数</span><input id="download_concurrency" type="number" min="1" max="32" step="1" required></label>
+          <label class="field"><span>aria2 单文件连接数</span><input id="aria2_connections" type="number" min="1" max="64" step="1" required></label>
+        </div>
+      </section>
+      <section class="panel section-card">
+        <h3>推理连接</h3>
+        <p class="lead">可指向本机 compose profile，或远程已有服务。</p>
+        <div class="form-grid">
+          <label class="field"><span>Ollama 服务地址</span><input id="ollama_base_url" autocomplete="off" required></label>
+          <label class="field"><span>vLLM 服务地址</span><input id="vllm_base_url" autocomplete="off" required></label>
+        </div>
+      </section>
+      </fieldset>
+      <div class="actions">
+        <button class="primary" id="set-save" type="submit" disabled>保存设置</button>
+        <button type="button" id="set-reload" hidden>重新加载</button>
+      </div>
+    </form>`,
+  );
 
   const fields = [
     "hf_endpoint",
@@ -703,41 +1098,63 @@ function renderSettings(gen) {
     "vllm_base_url",
   ];
 
-  guarded(async () => {
-    const data = await apiJson("/api/settings");
-    if (!stillOn("settings", gen)) return;
-
-    fields.forEach((key) => {
-      const el = $(key);
-      if (!el || data[key] == null) return;
-      el.value = String(data[key]);
-    });
-
-    const hfHint = $("hf_token_hint");
-    const msHint = $("ms_token_hint");
-    if (hfHint) {
-      hfHint.textContent = data.hf_token
-        ? "当前已配置 HF Token（输入新值才会覆盖）"
-        : "当前未配置 HF Token";
-    }
-    if (msHint) {
-      msHint.textContent = data.modelscope_api_token
-        ? "当前已配置 ModelScope Token（输入新值才会覆盖）"
-        : "当前未配置 ModelScope Token";
-    }
-
-    const loading = $("set-loading");
-    if (loading) loading.remove();
-    const saveBtn = $("set-save");
-    if (saveBtn) saveBtn.disabled = false;
-  }, { gen, page: "settings", flashId: "set-msg" });
-
+  const markDirty = () => {
+    settingsDirty = true;
+  };
   const form = $("set-form");
+  if (form) form.addEventListener("input", markDirty);
+
+  const hydrate = async () => {
+    const reloadBtn = $("set-reload");
+    if (reloadBtn) reloadBtn.hidden = true;
+    await guarded(
+      async () => {
+        const data = await apiJson("/api/settings");
+        if (!stillOn("settings", gen)) return;
+        fields.forEach((key) => {
+          const el = $(key);
+          if (!el || data[key] == null) return;
+          el.value = String(data[key]);
+        });
+        const hfHint = $("hf_token_hint");
+        const msHint = $("ms_token_hint");
+        if (hfHint) {
+          hfHint.textContent = data.hf_token_set
+            ? "当前已配置 HF Token（输入新值才会覆盖）"
+            : "当前未配置 HF Token";
+        }
+        if (msHint) {
+          msHint.textContent = data.modelscope_api_token_set
+            ? "当前已配置 ModelScope Token（输入新值才会覆盖）"
+            : "当前未配置 ModelScope Token";
+        }
+        const loading = $("set-loading");
+        if (loading) loading.remove();
+        const fieldset = $("set-fields");
+        if (fieldset) fieldset.disabled = false;
+        const saveBtn = $("set-save");
+        if (saveBtn) saveBtn.disabled = false;
+        settingsDirty = false;
+      },
+      { gen, page: "settings", flashId: "set-msg" },
+    );
+    if (!stillOn("settings", gen)) return;
+    if ($("set-loading")) {
+      showFlash("set-msg", "error", "设置加载失败，请重试。");
+      const reloadBtn2 = $("set-reload");
+      if (reloadBtn2) {
+        reloadBtn2.hidden = false;
+        reloadBtn2.onclick = () => hydrate();
+      }
+    }
+  };
+
+  hydrate();
+
   if (!form) return;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!stillOn("settings", gen)) return;
-
     const required = {
       hf_endpoint: $("hf_endpoint"),
       download_concurrency: $("download_concurrency"),
@@ -749,7 +1166,6 @@ function renderSettings(gen) {
       showFlash("set-msg", "error", "设置表单未就绪，请刷新页面后重试。");
       return;
     }
-
     const concurrency = Number(required.download_concurrency.value);
     const connections = Number(required.aria2_connections.value);
     if (!Number.isInteger(concurrency) || concurrency < 1) {
@@ -760,7 +1176,6 @@ function renderSettings(gen) {
       showFlash("set-msg", "error", "aria2 连接数必须是大于等于 1 的整数。");
       return;
     }
-
     const body = {
       hf_endpoint: required.hf_endpoint.value.trim(),
       download_concurrency: concurrency,
@@ -774,23 +1189,41 @@ function renderSettings(gen) {
     const msToken = msTokenEl ? msTokenEl.value.trim() : "";
     if (hfToken) body.hf_token = hfToken;
     if (msToken) body.modelscope_api_token = msToken;
-
+    const clearHf = $("clear_hf_token");
+    const clearMs = $("clear_modelscope_api_token");
+    if (clearHf && clearHf.checked) body.clear_hf_token = true;
+    if (clearMs && clearMs.checked) body.clear_modelscope_api_token = true;
     const saveBtn = $("set-save");
-    if (saveBtn) saveBtn.disabled = true;
-    await guarded(async () => {
-      await apiJson("/api/settings", { method: "PUT", body: JSON.stringify(body) });
-      if (!stillOn("settings", gen)) return;
-      if (hfTokenEl) hfTokenEl.value = "";
-      if (msTokenEl) msTokenEl.value = "";
-      showFlash("set-msg", "ok", "设置已保存");
-      if (hfToken || msToken) {
+    setBusy(saveBtn, true, "保存中…");
+    await guarded(
+      async () => {
+        const saved = await apiJson("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        if (!stillOn("settings", gen)) return;
+        if (hfTokenEl) hfTokenEl.value = "";
+        if (msTokenEl) msTokenEl.value = "";
+        if (clearHf) clearHf.checked = false;
+        if (clearMs) clearMs.checked = false;
         const hfHint = $("hf_token_hint");
         const msHint = $("ms_token_hint");
-        if (hfToken && hfHint) hfHint.textContent = "当前已配置 HF Token（输入新值才会覆盖）";
-        if (msToken && msHint) msHint.textContent = "当前已配置 ModelScope Token（输入新值才会覆盖）";
-      }
-    }, { gen, page: "settings", flashId: "set-msg" });
-    if (stillOn("settings", gen) && saveBtn) saveBtn.disabled = false;
+        if (hfHint) {
+          hfHint.textContent = saved.hf_token_set
+            ? "当前已配置 HF Token（输入新值才会覆盖）"
+            : "当前未配置 HF Token";
+        }
+        if (msHint) {
+          msHint.textContent = saved.modelscope_api_token_set
+            ? "当前已配置 ModelScope Token（输入新值才会覆盖）"
+            : "当前未配置 ModelScope Token";
+        }
+        settingsDirty = false;
+        showFlash("set-msg", "ok", "设置已保存");
+      },
+      { gen, page: "settings", flashId: "set-msg" },
+    );
+    if (stillOn("settings", gen)) setBusy(saveBtn, false);
   });
 }
 
@@ -803,6 +1236,15 @@ const VIEWS = {
 };
 
 function route() {
+  if (settingsDirty && currentPage() !== "settings") {
+    if (!confirm("设置尚未保存，确定离开？")) {
+      ignoreHashChange = true;
+      location.hash = "#/settings";
+      ignoreHashChange = false;
+      return;
+    }
+    settingsDirty = false;
+  }
   stopPoll();
   const page = currentPage();
   const wanted = `#/${page}`;
@@ -815,6 +1257,8 @@ function route() {
   markActiveNav(page);
   const view = VIEWS[page];
   if (typeof view === "function") view(gen);
+  const root = appRoot();
+  if (root) root.focus({ preventScroll: true });
 }
 
 async function showApp() {
@@ -826,8 +1270,18 @@ async function boot() {
   const signout = $("signout");
   if (signout) {
     signout.addEventListener("click", () => {
+      if (!confirm("确认退出登录？")) return;
       localStorage.removeItem(TOKEN_KEY);
       showLogin();
+    });
+  }
+  const brand = $("brand-home");
+  if (brand) {
+    brand.addEventListener("click", (event) => {
+      const nav = $("nav");
+      if (nav && nav.hidden) {
+        event.preventDefault();
+      }
     });
   }
   window.addEventListener("hashchange", () => {

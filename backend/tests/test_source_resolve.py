@@ -13,7 +13,8 @@ async def test_auto_prefers_modelscope_then_hf():
     async def ms_ok(n): return True
     async def hf_ok(n): return True
     order = await resolve_source("Qwen/Qwen2.5", "auto", "vllm", ms_exists=ms_ok, hf_exists=hf_ok)
-    assert order == ["modelscope"]
+    assert order[0] == "modelscope"
+    assert "huggingface" in order
 
 
 @pytest.mark.asyncio
@@ -21,7 +22,8 @@ async def test_auto_falls_back_to_hf():
     async def ms_ok(n): return False
     async def hf_ok(n): return True
     order = await resolve_source("Qwen/Qwen2.5", "auto", "vllm", ms_exists=ms_ok, hf_exists=hf_ok)
-    assert order == ["huggingface"]
+    assert order[0] == "huggingface"
+    assert "modelscope" in order
 
 
 @pytest.mark.asyncio

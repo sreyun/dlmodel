@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'">
   <title>模型下载管理</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -10,21 +11,27 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#app">跳到主内容</a>
+  <div class="bg-layer" aria-hidden="true"></div>
   <header class="topbar">
-    <div class="brand-wrap">
-      <div class="brand">模型下载管理</div>
-      <div class="brand-sub">Model Hub Console</div>
-    </div>
-    <nav id="nav" hidden>
-      <a href="#/download">下载</a>
-      <a href="#/tasks">任务</a>
-      <a href="#/library">模型库</a>
-      <a href="#/services">服务</a>
-      <a href="#/settings">设置</a>
+    <a class="brand-wrap" href="#/download" id="brand-home">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div>
+        <div class="brand">模型下载管理</div>
+        <div class="brand-sub">本机模型中心 · vLLM / Ollama</div>
+      </div>
+    </a>
+    <nav id="nav" hidden aria-label="主导航">
+      <a href="#/download" data-nav="download">下载</a>
+      <a href="#/tasks" data-nav="tasks">任务</a>
+      <a href="#/library" data-nav="library">模型库</a>
+      <a href="#/services" data-nav="services">服务</a>
+      <a href="#/settings" data-nav="settings">设置</a>
       <button type="button" id="signout" class="linkish">退出</button>
     </nav>
   </header>
-  <main id="app"></main>
+  <main id="app" tabindex="-1"></main>
+  <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
   <script src="/app.js"></script>
 </body>
 </html>

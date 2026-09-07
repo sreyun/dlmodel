@@ -1,30 +1,23 @@
+import asyncio
 import json
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.auth import require_admin
-from app.config import get_settings
 from app.db import get_task, list_tasks
 from app.models_schema import DownloadCreate, TaskOut
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
+_STATUS_ZH = {
+    "queued": "排队中",
+    "running": "下载中",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
 
 router = APIRouter()
-
-
-async def _require_events_auth(
-    authorization: Annotated[str | None, Header()] = None,
-    token: Annotated[str | None, Query()] = None,
-) -> None:
-    if authorization:
-        await require_admin(authorization)
-        return
-    if not token:
-        raise HTTPException(status_code=401, detail="缺少 Bearer 令牌")
-    if token != get_settings().admin_token:
-        raise HTTPException(status_code=401, detail="令牌无效")
 
 
 def _as_task(row: dict) -> TaskOut:
@@ -63,7 +56,7 @@ async def create_download(
 
 @router.get("/api/downloads")
 async def list_downloads(_: None = Depends(require_admin)) -> list[TaskOut]:
-    return [_as_task(row) for row in await list_tasks()]
+    return [_as_task(row) for row in await list_tasks(limit=200)]
 
 
 @router.get("/api/downloads/{task_id}")
@@ -79,7 +72,7 @@ async def cancel_download(
     if row["status"] in _TERMINAL:
         raise HTTPException(
             status_code=400,
-            detail=f"无法取消处于「{row['status']}」状态的任务",
+            detail=f"无法取消处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务",
         )
     await request.app.state.queue.cancel(task_id)
     return _as_task(await _get_existing(task_id))
@@ -93,9 +86,12 @@ async def retry_download(
     if row["status"] not in ("failed", "cancelled"):
         raise HTTPException(
             status_code=400,
-            detail=f"无法重试处于「{row['status']}」状态的任务",
+            detail=f"无法重试处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务",
         )
-    await request.app.state.queue.retry(task_id)
+    try:
+        await request.app.state.queue.retry(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _as_task(await _get_existing(task_id))
 
 
@@ -103,8 +99,9 @@ async def retry_download(
 async def download_events(
     task_id: str,
     request: Request,
-    _: None = Depends(_require_events_auth),
+    _: None = Depends(require_admin),
 ) -> StreamingResponse:
+    """SSE stream. Auth via Authorization Bearer only (no query tokens)."""
     await _get_existing(task_id)
     queue = request.app.state.queue
 
@@ -119,7 +116,13 @@ async def download_events(
             if evt["status"] in _TERMINAL:
                 return
             while True:
-                evt = await sub.get()
+                if await request.is_disconnected():
+                    return
+                try:
+                    evt = await asyncio.wait_for(sub.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
                 yield f"data: {json.dumps(evt)}\n\n"
                 if evt["status"] in _TERMINAL:
                     return

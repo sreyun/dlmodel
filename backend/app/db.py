@@ -1,9 +1,24 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import aiosqlite
 
 _DB_PATH: str | None = None
+_TASK_COLUMN_SET = frozenset(
+    {
+        "name",
+        "source",
+        "target",
+        "revision",
+        "status",
+        "progress_bytes",
+        "total_bytes",
+        "speed_bps",
+        "message",
+        "dest_path",
+        "updated_at",
+    }
+)
 
 _TASK_COLUMNS = (
     "id",
@@ -23,7 +38,7 @@ _TASK_COLUMNS = (
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _row_to_dict(row: aiosqlite.Row) -> dict:
@@ -31,6 +46,13 @@ def _row_to_dict(row: aiosqlite.Row) -> dict:
     if data.get("speed_bps") is not None:
         data["speed_bps"] = float(data["speed_bps"])
     return data
+
+
+def _validate_fields(fields: dict) -> dict:
+    unknown = set(fields) - _TASK_COLUMN_SET
+    if unknown:
+        raise ValueError(f"非法任务字段：{', '.join(sorted(unknown))}")
+    return fields
 
 
 async def init_db(db_path: str) -> None:
@@ -60,6 +82,9 @@ async def init_db(db_path: str) -> None:
             )
             """
         )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at DESC)"
+        )
         await db.commit()
 
 
@@ -82,6 +107,12 @@ async def set_setting(key: str, value: str) -> None:
             """,
             (key, value),
         )
+        await db.commit()
+
+
+async def delete_setting(key: str) -> None:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute("DELETE FROM settings WHERE key = ?", (key,))
         await db.commit()
 
 
@@ -121,7 +152,7 @@ async def update_task(task_id: str, **fields) -> None:
     if not fields:
         return
 
-    fields = dict(fields)
+    fields = _validate_fields(dict(fields))
     fields["updated_at"] = _now_iso()
     assignments = ", ".join(f"{column} = ?" for column in fields)
     values = list(fields.values()) + [task_id]
@@ -134,11 +165,80 @@ async def update_task(task_id: str, **fields) -> None:
         await db.commit()
 
 
-async def list_tasks() -> list[dict]:
+async def update_active_task(task_id: str, **fields) -> bool:
+    """Update only if the task is still queued/running. Returns whether a row changed."""
+    if not fields:
+        return False
+
+    fields = _validate_fields(dict(fields))
+    fields["updated_at"] = _now_iso()
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    values = list(fields.values()) + [task_id]
+
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            f"UPDATE tasks SET {assignments} WHERE id = ? AND status IN ('queued', 'running')",
+            values,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def claim_task_for_retry(task_id: str, **fields) -> bool:
+    """CAS: only requeue from failed/cancelled."""
+    fields = _validate_fields(dict(fields))
+    fields["updated_at"] = _now_iso()
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    values = list(fields.values()) + [task_id]
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            f"UPDATE tasks SET {assignments} WHERE id = ? AND status IN ('failed', 'cancelled')",
+            values,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def find_active_task(name: str, target: str) -> dict | None:
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            f"SELECT {', '.join(_TASK_COLUMNS)} FROM tasks ORDER BY created_at DESC"
+            f"""
+            SELECT {', '.join(_TASK_COLUMNS)} FROM tasks
+            WHERE name = ? AND target = ? AND status IN ('queued', 'running')
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (name, target),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _row_to_dict(row) if row else None
+
+
+async def list_tasks(*, limit: int = 200) -> list[dict]:
+    limit = max(1, min(int(limit), 1000))
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT {', '.join(_TASK_COLUMNS)} FROM tasks ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [_row_to_dict(row) for row in rows]
+
+
+async def list_tasks_by_status(*statuses: str) -> list[dict]:
+    if not statuses:
+        return []
+    placeholders = ", ".join("?" for _ in statuses)
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""
+            SELECT {', '.join(_TASK_COLUMNS)} FROM tasks
+            WHERE status IN ({placeholders})
+            ORDER BY created_at ASC
+            """,
+            statuses,
         ) as cursor:
             rows = await cursor.fetchall()
             return [_row_to_dict(row) for row in rows]

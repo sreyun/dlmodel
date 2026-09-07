@@ -8,10 +8,10 @@ TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
 class DownloadCreate(BaseModel):
-    name: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=256)
     source: Source = "auto"
     target: Target = "vllm"
-    revision: str | None = None
+    revision: str | None = Field(default=None, max_length=128)
 
 
 class TaskOut(BaseModel):

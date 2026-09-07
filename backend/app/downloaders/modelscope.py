@@ -36,6 +36,13 @@ async def ms_repo_exists(name: str, token: str | None) -> bool:
         raise
 
 
+async def _drain_thread_task(task: asyncio.Task) -> None:
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 async def download_modelscope(
     name: str,
     dest: Path,
@@ -44,6 +51,7 @@ async def download_modelscope(
     revision: str | None,
     on_progress: ProgressCallback,
     on_log: LogCallback,
+    on_detached=None,
 ) -> None:
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -77,9 +85,17 @@ async def download_modelscope(
             last_size = size
             last_ts = now
         result = await download_task
-    except Exception:
+    except BaseException:
         if not download_task.done():
-            download_task.cancel()
+
+            async def _detach() -> None:
+                await _drain_thread_task(download_task)
+                if on_detached is not None:
+                    on_detached()
+
+            asyncio.create_task(_detach())
+        elif on_detached is not None:
+            on_detached()
         raise
 
     final_size = _dir_size_bytes(dest)

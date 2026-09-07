@@ -8,6 +8,11 @@ from app.aria2_client import Aria2Client
 from app.config import optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
 from app.downloaders.sdk_fallback import http_download
+from app.paths import safe_path_under
+
+
+class DownloadRemoved(RuntimeError):
+    """aria2 download was force-removed (typically user cancel)."""
 
 
 async def hf_repo_exists(name: str, endpoint: str, token: str | None) -> bool:
@@ -61,8 +66,10 @@ async def _download_with_aria2(
         )
         if status["status"] == "complete":
             break
-        if status["status"] in ("error", "removed"):
-            raise RuntimeError(f"aria2 returned status {status['status']}")
+        if status["status"] == "removed":
+            raise DownloadRemoved("aria2 下载已被移除")
+        if status["status"] == "error":
+            raise RuntimeError("aria2 返回异常状态：error")
         await asyncio.sleep(1)
 
 
@@ -79,7 +86,7 @@ async def _download_hf_file(
     on_log: LogCallback,
 ) -> None:
     url = _hf_download_url(name, filename, revision, endpoint)
-    file_dest = dest / filename
+    file_dest = safe_path_under(Path(dest), filename)
     await on_log(f"正在下载 {filename}")
 
     token = optional_secret(token)
@@ -96,6 +103,8 @@ async def _download_hf_file(
                 url, file_dest, aria2, connections, on_progress
             )
             return
+        except DownloadRemoved:
+            raise
         except Exception as exc:
             await on_log(
                 f"aria2 下载 {filename} 失败：{exc}；回退到 HTTP"
@@ -145,6 +154,10 @@ async def download_hf(
     files = await asyncio.to_thread(
         api.list_repo_files, repo_id=name, revision=revision, repo_type="model"
     )
+    # Jail every remote filename before touching disk.
+    for filename in files:
+        safe_path_under(Path(dest), filename)
+
     await on_log(f"共 {len(files)} 个文件：{name}")
     sizes = await _repo_file_sizes(api, name, revision, files)
     total_known = sum(sizes.values()) if sizes and len(sizes) == len(files) else None
@@ -172,15 +185,13 @@ async def download_hf(
             file_progress,
             on_log,
         )
-        file_path = Path(dest) / filename
+        file_path = safe_path_under(Path(dest), filename)
         if filename in sizes:
             completed_before += sizes[filename]
         elif file_path.exists():
             completed_before += file_path.stat().st_size
-        await on_progress(
-            completed_before,
-            total_known if total_known is not None else completed_before,
-            0.0,
-        )
+        # When repo-wide size is unknown, keep total None so the UI stays indeterminate
+        # instead of falsely jumping to 100% between files.
+        await on_progress(completed_before, total_known, 0.0)
 
     await on_log(f"HF 下载完成：{name}")

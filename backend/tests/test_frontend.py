@@ -27,6 +27,8 @@ def test_spa_index_served(monkeypatch, tmp_path):
         assert "任务" in body
         assert "模型库" in body
         assert "设置" in body
+        assert "skip-link" in body
+        assert "Content-Security-Policy" in body
         assert 'lang="zh-CN"' in body
         assert "Noto+Sans+SC" in body or "IBM+Plex+Sans" in body or "Noto Sans SC" in body
         assert 'src="/app.js"' in body or 'src="app.js"' in body
@@ -42,15 +44,20 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "1000" in js.text
         assert "if (hfToken) body.hf_token = hfToken" in js.text
         assert "if (msToken) body.modelscope_api_token = msToken" in js.text
+        assert "clear_hf_token" in js.text
+        assert "hf_token_set" in js.text
         assert "stillOn" in js.text
         assert "set-msg" in js.text
         assert "login-token" in js.text
         assert "task-list" in js.text
         assert "progress-fill" in js.text
         assert "taskCard" in js.text
+        assert "pairWarning" in js.text
+        assert 'class="btn' in js.text
         css = client.get("/styles.css")
         assert css.status_code == 200
         assert "progress-track" in css.text
+        assert "focus-visible" in css.text
         assert css.text.strip()
 
 

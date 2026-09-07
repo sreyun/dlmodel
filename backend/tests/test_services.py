@@ -15,4 +15,6 @@ async def test_ollama_health_ok():
 
 def test_vllm_launch_command():
     cmd = vllm_launch_command("/models/hf/Qwen/Qwen2.5-7B-Instruct")
-    assert "--model /models/hf/Qwen/Qwen2.5-7B-Instruct" in cmd
+    assert "--model" in cmd
+    assert "/models/hf/Qwen/Qwen2.5-7B-Instruct" in cmd
+    assert "--port 8000" in cmd

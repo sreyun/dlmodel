@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     env_file: .env
     volumes:
       - ./data/models:/models
@@ -23,14 +23,14 @@ services:
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest
-    ports: ["11434:11434"]
+    ports: ["127.0.0.1:11434:11434"]
     volumes:
       - ./data/models/ollama:/root/.ollama
   vllm:
     profiles: ["vllm"]
     image: vllm/vllm-openai:latest
     runtime: nvidia
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
     volumes:

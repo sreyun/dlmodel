@@ -54,6 +54,8 @@ def test_settings_merge_env_and_sqlite(client):
     assert body["hf_endpoint"] == "https://hf-mirror.com"
     assert body["download_concurrency"] == 2
     assert body["aria2_connections"] == 16
+    assert "hf_token" not in body
+    assert body["hf_token_set"] is False
     r = client.put(
         "/api/settings",
         headers=headers,
@@ -80,8 +82,9 @@ def test_empty_hf_token_env_exposed_as_null(tmp_path, monkeypatch):
         r = client.get("/api/settings", headers={"Authorization": "Bearer secret"})
     assert r.status_code == 200
     body = r.json()
-    assert body["hf_token"] is None
-    assert body["modelscope_api_token"] is None
+    assert body["hf_token_set"] is False
+    assert body["modelscope_api_token_set"] is False
+    assert "hf_token" not in body
 
 
 def test_blank_token_put_does_not_shadow_env(tmp_path, monkeypatch):
@@ -105,11 +108,33 @@ def test_blank_token_put_does_not_shadow_env(tmp_path, monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert body["hf_endpoint"] == "https://example.test"
-        assert body["hf_token"] == "env-hf-token"
-        assert body["modelscope_api_token"] == "env-ms-token"
+        assert body["hf_token_set"] is True
+        assert body["modelscope_api_token_set"] is True
         again = client.get("/api/settings", headers=headers).json()
-        assert again["hf_token"] == "env-hf-token"
-        assert again["modelscope_api_token"] == "env-ms-token"
+        assert again["hf_token_set"] is True
+        assert again["modelscope_api_token_set"] is True
+
+
+def test_clear_hf_token_removes_sqlite_and_env_poison(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    app = create_app()
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        client.put(
+            "/api/settings",
+            headers=headers,
+            json={"hf_token": "sqlite-hf-token"},
+        )
+        assert client.get("/api/settings", headers=headers).json()["hf_token_set"] is True
+        cleared = client.put(
+            "/api/settings",
+            headers=headers,
+            json={"clear_hf_token": True},
+        ).json()
+        assert cleared["hf_token_set"] is False
 
 
 def test_create_download_rejects_traversal(client):
@@ -161,7 +186,7 @@ async def test_empty_sqlite_token_does_not_override_env(tmp_path, monkeypatch):
     assert merged["modelscope_api_token"] == "env-ms-token"
 
 
-def test_events_accepts_token_query(client):
+def test_events_requires_bearer_not_query_token(client):
     headers = {"Authorization": "Bearer secret"}
     r = client.post(
         "/api/downloads",
@@ -171,7 +196,9 @@ def test_events_accepts_token_query(client):
     tid = r.json()["id"]
     denied = client.get(f"/api/downloads/{tid}/events")
     assert denied.status_code == 401
-    ev = client.get(f"/api/downloads/{tid}/events?token=secret")
+    query_only = client.get(f"/api/downloads/{tid}/events?token=secret")
+    assert query_only.status_code == 401
+    ev = client.get(f"/api/downloads/{tid}/events", headers=headers)
     assert ev.status_code == 200
     assert ev.headers["content-type"].startswith("text/event-stream")
     assert "data: " in ev.text

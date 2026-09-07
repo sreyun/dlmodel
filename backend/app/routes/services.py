@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from app.auth import require_admin
 from app.routes.settings import effective_settings
@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 class OllamaPullRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
 
 
 @router.get("/api/services/ollama/health")
@@ -22,7 +22,10 @@ async def ollama_health_route(_: None = Depends(require_admin)) -> dict:
 @router.get("/api/services/ollama/models")
 async def ollama_models_route(_: None = Depends(require_admin)) -> list[dict]:
     settings = await effective_settings()
-    return await ollama_list_models(settings["ollama_base_url"])
+    try:
+        return await ollama_list_models(settings["ollama_base_url"])
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/api/services/ollama/pull")
@@ -30,7 +33,10 @@ async def ollama_pull_route(
     body: OllamaPullRequest, _: None = Depends(require_admin)
 ) -> dict:
     settings = await effective_settings()
-    await ollama_pull(settings["ollama_base_url"], body.name)
+    try:
+        await ollama_pull(settings["ollama_base_url"], body.name.strip())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True}
 
 
@@ -42,8 +48,11 @@ async def vllm_health_route(_: None = Depends(require_admin)) -> dict:
 
 @router.get("/api/services/vllm/launch-command")
 async def vllm_launch_command_route(
-    model: str = Query(...),
-    port: int = Query(8000),
+    model: str = Query(..., min_length=1),
+    port: int = Query(8000, ge=1, le=65535),
     _: None = Depends(require_admin),
 ) -> dict:
-    return {"command": vllm_launch_command(model, port)}
+    try:
+        return {"command": vllm_launch_command(model, port)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

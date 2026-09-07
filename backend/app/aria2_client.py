@@ -13,7 +13,9 @@ class Aria2Client:
     ) -> None:
         self._rpc_url = rpc_url
         self._secret = secret
-        self._client = client or httpx.AsyncClient()
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+        )
         self._owns_client = client is None
 
     async def close(self) -> None:
@@ -36,7 +38,10 @@ class Aria2Client:
         resp.raise_for_status()
         data = resp.json()
         if "error" in data:
-            raise RuntimeError(data["error"])
+            err = data["error"]
+            if isinstance(err, dict):
+                raise RuntimeError(err.get("message") or str(err))
+            raise RuntimeError(str(err))
         return data["result"]
 
     async def is_available(self) -> bool:

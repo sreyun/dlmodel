@@ -3,7 +3,18 @@ from pathlib import Path
 
 
 def _dir_size_bytes(path: Path) -> int:
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            if not item.is_file():
+                continue
+            try:
+                total += item.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return total
+    return total
 
 
 def _resolve_model_path(model_root: str, model_id: str) -> Path:
@@ -27,10 +38,19 @@ def scan_hf_library(model_root: str) -> list[dict]:
         return []
 
     items: list[dict] = []
-    for org_dir in sorted(hf_root.iterdir()):
+    try:
+        org_dirs = sorted(hf_root.iterdir())
+    except OSError:
+        return []
+
+    for org_dir in org_dirs:
         if not org_dir.is_dir():
             continue
-        for repo_dir in sorted(org_dir.iterdir()):
+        try:
+            repo_dirs = sorted(org_dir.iterdir())
+        except OSError:
+            continue
+        for repo_dir in repo_dirs:
             if not repo_dir.is_dir():
                 continue
             name = f"{org_dir.name}/{repo_dir.name}"
