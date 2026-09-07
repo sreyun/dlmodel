@@ -1,0 +1,81 @@
+import os
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+
+from app.auth import require_admin
+from app.config import get_settings
+from app.db import get_setting, set_setting
+
+router = APIRouter()
+
+_MERGE_KEYS = (
+    "hf_endpoint",
+    "hf_token",
+    "modelscope_api_token",
+    "download_concurrency",
+    "aria2_connections",
+    "ollama_base_url",
+    "vllm_base_url",
+)
+_INT_KEYS = frozenset({"download_concurrency", "aria2_connections"})
+_ENV_NAMES = {
+    "hf_endpoint": "HF_ENDPOINT",
+    "hf_token": "HF_TOKEN",
+    "modelscope_api_token": "MODELSCOPE_API_TOKEN",
+    "download_concurrency": "DOWNLOAD_CONCURRENCY",
+    "aria2_connections": "ARIA2_CONNECTIONS",
+    "ollama_base_url": "OLLAMA_BASE_URL",
+    "vllm_base_url": "VLLM_BASE_URL",
+}
+
+
+class SettingsUpdate(BaseModel):
+    hf_endpoint: str | None = None
+    hf_token: str | None = None
+    modelscope_api_token: str | None = None
+    download_concurrency: int | None = None
+    aria2_connections: int | None = None
+    ollama_base_url: str | None = None
+    vllm_base_url: str | None = None
+
+
+def _coerce(key: str, raw: str):
+    if key in _INT_KEYS:
+        return int(raw)
+    return raw
+
+
+async def merged_settings() -> dict:
+    base = get_settings()
+    out = {key: getattr(base, key) for key in _MERGE_KEYS}
+    for key in _MERGE_KEYS:
+        raw = await get_setting(key)
+        if raw is not None:
+            out[key] = _coerce(key, raw)
+    return out
+
+
+async def apply_sqlite_overrides() -> None:
+    for key, env_name in _ENV_NAMES.items():
+        raw = await get_setting(key)
+        if raw is not None:
+            os.environ[env_name] = raw
+
+
+@router.get("/api/settings")
+async def get_settings_route(_: None = Depends(require_admin)) -> dict:
+    return await merged_settings()
+
+
+@router.put("/api/settings")
+async def put_settings_route(
+    body: SettingsUpdate, _: None = Depends(require_admin)
+) -> dict:
+    updates = body.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if key not in _ENV_NAMES:
+            continue
+        stored = "" if value is None else str(value)
+        await set_setting(key, stored)
+    return await merged_settings()
