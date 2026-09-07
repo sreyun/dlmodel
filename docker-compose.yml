@@ -1,0 +1,35 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports: ["8080:8080"]
+    env_file: .env
+    volumes:
+      - ./data/models:/models
+      - ./data/app:/data
+    depends_on: [aria2]
+  aria2:
+    image: p3terx/aria2-pro:latest
+    environment:
+      RPC_SECRET: ${ARIA2_RPC_SECRET:-dlmodel}
+      RPC_PORT: 6800
+    volumes:
+      - ./data/models:/models
+      - ./data/aria2:/config
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ./data/models/ollama:/root/.ollama
+  vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    ports: ["8000:8000"]
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ./data/models/hf:/models/hf
+    command: ["--model", "${VLLM_MODEL:-/models/hf}", "--host", "0.0.0.0", "--port", "8000"]

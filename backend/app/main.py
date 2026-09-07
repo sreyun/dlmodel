@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from app.routes.services import router as services_router
 from app.routes.settings import apply_sqlite_overrides, router as settings_router
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_FRONTEND_DIR = _REPO_ROOT / "frontend"
+# Repo checkout: <root>/backend/app/main.py → parents[2]/frontend.
+# Docker: pip install moves __file__ into site-packages; set FRONTEND_DIR=/frontend.
+_FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR") or (_REPO_ROOT / "frontend"))
 
 
 @asynccontextmanager
