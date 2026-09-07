@@ -26,17 +26,19 @@ CI builds and pushes `swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel` on ev
 
 ```bash
 cp .env.example .env   # set a strong ADMIN_TOKEN; do NOT enable ALLOW_INSECURE_ADMIN
-export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0
+export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
 docker login swr.cn-east-3.myhuaweicloud.com
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
+
+CI also pushes version tags (`v0.3.2`, …). Pin those instead of `latest` when you need a fixed rollback target.
 
 Optional Compose convenience:
 
 ```bash
 # .env
 COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
-DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0
+DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
 ```
 
 ### CI secrets / variables
@@ -59,9 +61,10 @@ Create the organization once in [SWR console](https://console.huaweicloud.com/sw
 Tag release flow:
 
 ```bash
-git tag -a v0.3.0 -m "v0.3.0"
-git push origin v0.3.0
+git tag -a v0.3.2 -m "v0.3.2"
+git push origin v0.3.2
 # → GitHub Action "Build and push Huawei SWR" runs automatically
+# → pushes both :v0.3.2 and :latest
 ```
 
 Manual rebuild: Actions → **Build and push Huawei SWR** → Run workflow.
@@ -128,7 +131,7 @@ See `.env.example`. Important variables:
 |----------|---------|
 | `ADMIN_TOKEN` | Bearer token for the UI and `/api` |
 | `MODEL_ROOT` / `DATA_DIR` | Model and SQLite volumes |
-| `DLMODEL_IMAGE` | Container image for production compose |
+| `DLMODEL_IMAGE` | Production web image (`:latest` recommended; pin `:vX.Y.Z` for rollback) |
 | `HF_ENDPOINT` / `HF_TOKEN` | Hugging Face mirror and token |
 | `MODELSCOPE_API_TOKEN` | ModelScope token |
 | `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | aria2 JSON-RPC (secret must match the `aria2` service) |

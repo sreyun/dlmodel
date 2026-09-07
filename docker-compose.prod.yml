@@ -1,7 +1,8 @@
 # Production overlay — pull prebuilt image from Huawei SWR (or any registry).
 # Prerequisites:
 #   1. docker login swr.cn-east-3.myhuaweicloud.com
-#   2. export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel:vX.Y.Z
+#   2. export DLMODEL_IMAGE=.../dlmodel:latest   (default recommendation)
+#      Or pin a release for rollback: .../dlmodel:vX.Y.Z
 #   3. Strong ADMIN_TOKEN in .env (do NOT set ALLOW_INSECURE_ADMIN=1)
 #
 # Usage:
@@ -9,7 +10,7 @@
 
 services:
   web:
-    image: ${DLMODEL_IMAGE:?set DLMODEL_IMAGE to your SWR tag, e.g. swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.0}
+    image: ${DLMODEL_IMAGE:?set DLMODEL_IMAGE, e.g. swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest}
     pull_policy: always
     ports:
       - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:8080"

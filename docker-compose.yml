@@ -1,7 +1,8 @@
 # Shared base stack for dlmodel (web + aria2 + optional inference profiles).
 # Dev:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-# Prod: DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<ns>/dlmodel:vX.Y.Z \
+# Prod: DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<ns>/dlmodel:latest \
 #         docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#       (pin :vX.Y.Z instead of :latest when you need reproducible rollbacks)
 
 x-web-env: &web-env
   MODEL_ROOT: ${MODEL_ROOT:-/models}
