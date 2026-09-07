@@ -1,8 +1,11 @@
-# Shared base stack for dlmodel (web + aria2 + optional inference profiles).
-# Dev:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-# Prod: DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/<ns>/dlmodel:latest \
-#         docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#       (pin :vX.Y.Z instead of :latest when you need reproducible rollbacks)
+# Production stack (default). Usage:
+#   cp .env.example .env   # set a strong ADMIN_TOKEN
+#   docker login swr.cn-east-3.myhuaweicloud.com
+#   docker compose up -d
+#
+# Override image: DLMODEL_IMAGE=.../dlmodel:vX.Y.Z in .env (pin for rollback).
+# Local development (build from source, bind localhost):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 x-web-env: &web-env
   MODEL_ROOT: ${MODEL_ROOT:-/models}
@@ -20,9 +23,18 @@ x-web-env: &web-env
   ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme}
   ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-0}
 
+x-json-log: &json-log
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   web:
-    image: ${DLMODEL_IMAGE:-dlmodel:local}
+    image: ${DLMODEL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest}
+    pull_policy: always
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:8080"
     environment:
       <<: *web-env
     env_file:
@@ -34,6 +46,20 @@ services:
       aria2:
         condition: service_started
     networks: [dlmodel]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    logging: *json-log
 
   aria2:
     image: ${ARIA2_IMAGE:-p3terx/aria2-pro:latest}
@@ -47,18 +73,29 @@ services:
       - ${HOST_MODEL_ROOT:-./data/models}:/models
       - ${HOST_ARIA2_DIR:-./data/aria2}:/config
     networks: [dlmodel]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   ollama:
     profiles: ["ollama"]
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    ports:
+      - "${OLLAMA_BIND:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ${HOST_MODEL_ROOT:-./data/models}/ollama:/root/.ollama
     networks: [dlmodel]
+    restart: unless-stopped
 
   vllm:
     profiles: ["vllm"]
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
     runtime: ${VLLM_RUNTIME:-nvidia}
+    ports:
+      - "${VLLM_BIND:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
     volumes:
@@ -73,6 +110,7 @@ services:
         "8000",
       ]
     networks: [dlmodel]
+    restart: unless-stopped
 
 networks:
   dlmodel:

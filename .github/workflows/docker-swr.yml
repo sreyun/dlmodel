@@ -94,6 +94,6 @@ jobs:
             echo "- Namespace: \`${{ steps.meta.outputs.namespace }}\`"
             echo "- Tags: \`${{ steps.meta.outputs.tag }}\`, \`latest\`"
             echo "- Pull: \`docker pull ${{ steps.meta.outputs.image_latest }}\`"
-            echo "- Prod compose (rolling): \`DLMODEL_IMAGE=${{ steps.meta.outputs.image_latest }} docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d\`"
-            echo "- Prod compose (pinned): \`DLMODEL_IMAGE=${{ steps.meta.outputs.image_tag }} docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d\`"
+            echo "- Prod: \`docker login ${SWR_REGISTRY} && docker compose up -d\`"
+            echo "- Prod (pinned): \`DLMODEL_IMAGE=${{ steps.meta.outputs.image_tag }} docker compose up -d\`"
           } >> "$GITHUB_STEP_SUMMARY"

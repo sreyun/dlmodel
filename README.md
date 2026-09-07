@@ -33,23 +33,21 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 每个 `v*` 标签会触发 GitHub Actions，推送镜像：
 
 - `swr.cn-east-3.myhuaweicloud.com/<namespace>/dlmodel:<tag>`
-- `…/dlmodel:latest`（滚动更新推荐）
+- `…/dlmodel:latest`（默认拉取）
 
 ```bash
 cp .env.example .env          # 设置强 ADMIN_TOKEN；不要开 ALLOW_INSECURE_ADMIN
-export DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
 docker login swr.cn-east-3.myhuaweicloud.com
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose up -d
 ```
 
-需要可回滚时改用版本号，例如 `:v0.3.2`。`pull_policy: always` 会在每次 `up` 时拉取最新镜像。
-
-也可写入 `.env`：
+默认镜像为 SWR 的 `:latest`。需要固定版本时在 `.env` 写入：
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
-DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:latest
+DLMODEL_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/dlmodel:v0.3.2
 ```
+
+`pull_policy: always` 会在每次 `up` 时拉取镜像。Web 默认监听 `0.0.0.0:8080`（可用 `WEB_BIND` / `WEB_PORT` 调整）。
 
 ### 发布与 CI
 
@@ -109,6 +107,11 @@ git push origin v0.3.2
 管理与下载不依赖推理服务；需要时再启：
 
 ```bash
+# 生产（已 docker compose up -d）
+docker compose --profile ollama up -d
+docker compose --profile vllm up -d
+
+# 开发
 docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile ollama up -d --build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile vllm up -d --build
 ```
@@ -132,7 +135,7 @@ vLLM 注意：
 |------|------|
 | `ADMIN_TOKEN` | UI / API Bearer |
 | `MODEL_ROOT` / `DATA_DIR` | 模型与 SQLite |
-| `DLMODEL_IMAGE` | 生产镜像（推荐 `:latest`，回滚钉 `:vX.Y.Z`） |
+| `DLMODEL_IMAGE` | 生产镜像（默认 SWR `:latest`；回滚钉 `:vX.Y.Z`） |
 | `HF_ENDPOINT` / `HF_TOKEN` | HF 镜像与 Token |
 | `MODELSCOPE_API_TOKEN` | 魔搭 Token |
 | `ARIA2_RPC_URL` / `ARIA2_RPC_SECRET` | 须与 `aria2` 服务一致 |
@@ -164,6 +167,5 @@ cd backend && python -m pytest tests/ -q
 
 | 文件 | 用途 |
 |------|------|
-| `docker-compose.yml` | 基础栈（web + aria2 + 可选 profile） |
-| `docker-compose.dev.yml` | 本地构建、本机绑定、宽松管理 Token |
-| `docker-compose.prod.yml` | 拉取 SWR 镜像、健康检查、日志轮转、可对外端口 |
+| `docker-compose.yml` | **默认生产**：`docker compose up -d`（拉 SWR 镜像、健康检查、日志轮转） |
+| `docker-compose.dev.yml` | 本地开发 overlay：源码构建、仅绑本机、宽松 Token |
