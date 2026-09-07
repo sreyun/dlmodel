@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.db import init_db
@@ -11,6 +12,9 @@ from app.routes.downloads import router as downloads_router
 from app.routes.models import router as models_router
 from app.routes.services import router as services_router
 from app.routes.settings import apply_sqlite_overrides, router as settings_router
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FRONTEND_DIR = _REPO_ROOT / "frontend"
 
 
 @asynccontextmanager
@@ -35,6 +39,8 @@ def create_app() -> FastAPI:
     app.include_router(downloads_router)
     app.include_router(models_router)
     app.include_router(services_router)
+    # Mount last so "/" does not shadow /api routes.
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="static")
     return app
 
 
