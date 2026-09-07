@@ -71,6 +71,14 @@ async def test_hf_repo_exists_true():
 
 
 @pytest.mark.asyncio
+async def test_hf_repo_exists_blank_token_omits_auth():
+    with patch("app.downloaders.hf.HfApi") as MockApi:
+        MockApi.return_value.repo_info = MagicMock(return_value={"id": "repo"})
+        assert await hf_repo_exists("org/model", "https://hf.co", "") is True
+        MockApi.assert_called_once_with(endpoint="https://hf.co", token=None)
+
+
+@pytest.mark.asyncio
 async def test_hf_repo_exists_false():
     with patch("app.downloaders.hf.HfApi") as MockApi:
         MockApi.return_value.repo_info = MagicMock(side_effect=_hf_404())
@@ -190,6 +198,40 @@ async def test_download_hf_token_uses_authenticated_http():
         http_mock.assert_awaited_once()
         _, kwargs = http_mock.call_args
         assert kwargs["headers"]["Authorization"] == "Bearer secret-token"
+
+
+@pytest.mark.asyncio
+async def test_download_hf_blank_token_skips_auth_header():
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch(
+            "app.downloaders.hf.hf_hub_url", return_value="https://hf.co/file.bin"
+        ),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock) as http_mock,
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(return_value=["file.bin"])
+
+        async def on_progress(d, t, s):
+            pass
+
+        async def on_log(m):
+            pass
+
+        await download_hf(
+            "org/model",
+            Path("/tmp/dest"),
+            endpoint="https://hf.co",
+            token="   ",
+            revision="main",
+            aria2=None,
+            connections=4,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+        MockApi.assert_called_once_with(endpoint="https://hf.co", token=None)
+        http_mock.assert_awaited_once()
+        _, kwargs = http_mock.call_args
+        assert not kwargs.get("headers")
 
 
 @pytest.mark.asyncio

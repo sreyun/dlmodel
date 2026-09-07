@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.auth import require_admin
-from app.config import get_settings
+from app.config import get_settings, optional_secret
 from app.db import get_setting, set_setting
 
 router = APIRouter()
@@ -19,6 +19,7 @@ _MERGE_KEYS = (
     "vllm_base_url",
 )
 _INT_KEYS = frozenset({"download_concurrency", "aria2_connections"})
+_TOKEN_KEYS = frozenset({"hf_token", "modelscope_api_token"})
 _ENV_NAMES = {
     "hf_endpoint": "HF_ENDPOINT",
     "hf_token": "HF_TOKEN",
@@ -53,6 +54,8 @@ async def effective_settings() -> dict:
         raw = await get_setting(key)
         if raw is not None:
             out[key] = _coerce(key, raw)
+    for key in _TOKEN_KEYS:
+        out[key] = optional_secret(out.get(key))
     return out
 
 

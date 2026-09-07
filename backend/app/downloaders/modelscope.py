@@ -6,11 +6,12 @@ import requests
 from modelscope import snapshot_download
 from modelscope.hub.api import HubApi
 
+from app.config import optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
 
 
 async def ms_repo_exists(name: str, token: str | None) -> bool:
-    api = HubApi(token=token)
+    api = HubApi(token=optional_secret(token))
     try:
         return await asyncio.to_thread(
             api.repo_exists, repo_id=name, repo_type="model", re_raise=True
@@ -37,7 +38,7 @@ async def download_modelscope(
             model_id=name,
             revision=revision,
             local_dir=str(dest),
-            token=token,
+            token=optional_secret(token),
         )
 
     result = await asyncio.to_thread(_download)

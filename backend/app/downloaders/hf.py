@@ -5,12 +5,13 @@ from huggingface_hub import HfApi, hf_hub_url
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from app.aria2_client import Aria2Client
+from app.config import optional_secret
 from app.downloaders.base import LogCallback, ProgressCallback
 from app.downloaders.sdk_fallback import http_download
 
 
 async def hf_repo_exists(name: str, endpoint: str, token: str | None) -> bool:
-    api = HfApi(endpoint=endpoint, token=token)
+    api = HfApi(endpoint=endpoint, token=optional_secret(token))
     try:
         await asyncio.to_thread(api.repo_info, repo_id=name, repo_type="model")
         return True
@@ -81,6 +82,7 @@ async def _download_hf_file(
     file_dest = dest / filename
     await on_log(f"Downloading {filename}")
 
+    token = optional_secret(token)
     auth_headers = {"Authorization": f"Bearer {token}"} if token else None
 
     if token:
@@ -116,6 +118,7 @@ async def download_hf(
     on_progress: ProgressCallback,
     on_log: LogCallback,
 ) -> None:
+    token = optional_secret(token)
     api = HfApi(endpoint=endpoint, token=token)
     files = await asyncio.to_thread(
         api.list_repo_files, repo_id=name, revision=revision, repo_type="model"

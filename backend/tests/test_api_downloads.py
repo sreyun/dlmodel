@@ -69,6 +69,21 @@ def test_settings_merge_env_and_sqlite(client):
     assert merged["vllm_base_url"] == "http://vllm:8000"
 
 
+def test_empty_hf_token_env_exposed_as_null(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    monkeypatch.setenv("HF_TOKEN", "")
+    monkeypatch.setenv("MODELSCOPE_API_TOKEN", "  ")
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.get("/api/settings", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["hf_token"] is None
+    assert body["modelscope_api_token"] is None
+
+
 def test_events_accepts_token_query(client):
     headers = {"Authorization": "Bearer secret"}
     r = client.post(

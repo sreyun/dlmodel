@@ -1,4 +1,12 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def optional_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 class Settings(BaseSettings):
@@ -20,6 +28,13 @@ class Settings(BaseSettings):
     vllm_model: str | None = None
     host: str = "0.0.0.0"
     port: int = 8080
+
+    @field_validator("hf_token", "modelscope_api_token", "vllm_model", mode="before")
+    @classmethod
+    def _blank_optional_to_none(cls, value):
+        if value is None or isinstance(value, str):
+            return optional_secret(value)
+        return value
 
 
 def get_settings() -> Settings:
