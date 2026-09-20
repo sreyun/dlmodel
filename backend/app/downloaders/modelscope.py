@@ -154,7 +154,7 @@ async def download_modelscope(
             delay = retry_backoff_seconds(attempt)
             msg = (
                 f"ModelScope 网络中断（{exc}），{delay:.0f}s 后重试 "
-                f"（{attempt + 1}/{attempts - 1}）…"
+                f"（第 {attempt + 2}/{attempts} 次尝试）…"
             )
             logger.warning(
                 "modelscope retry name=%s attempt=%s err=%s", name, attempt + 1, exc

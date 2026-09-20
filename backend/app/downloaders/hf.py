@@ -87,6 +87,7 @@ async def _download_hf_file(
     endpoint: str,
     token: str | None,
     aria2: Aria2Client | None,
+    use_aria2: bool,
     connections: int,
     on_progress: ProgressCallback,
     on_log: LogCallback,
@@ -100,7 +101,7 @@ async def _download_hf_file(
     auth_headers = {"Authorization": f"Bearer {token}"} if token else None
     aria2_headers = [f"Authorization: Bearer {token}"] if token else None
 
-    if aria2 and await aria2.is_available():
+    if use_aria2:
         try:
             if token:
                 await on_log("使用 aria2（带 HF Token）加速下载")
@@ -190,6 +191,10 @@ async def download_hf(
     total_known = sum(sizes.values()) if sizes and len(sizes) == len(files) else None
     completed_before = 0
 
+    # Probe aria2 once per download instead of per file: an unreachable aria2 RPC
+    # otherwise costs a (2s) connect timeout on every file before HTTP fallback.
+    use_aria2 = aria2 is not None and await aria2.is_available()
+
     for index, filename in enumerate(files, start=1):
         file_path = safe_path_under(Path(dest), filename)
         expected = sizes.get(filename)
@@ -221,6 +226,7 @@ async def download_hf(
             endpoint,
             token,
             aria2,
+            use_aria2,
             connections,
             file_progress,
             on_log,

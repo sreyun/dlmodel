@@ -281,6 +281,43 @@ async def test_download_hf_blank_token_skips_auth_header():
 
 
 @pytest.mark.asyncio
+async def test_download_hf_probes_aria2_once_per_task():
+    # Regression: availability was probed per file, so an unreachable aria2 added
+    # a connect-timeout to every file. It must now be probed once and cached.
+    aria2 = MagicMock()
+    aria2.is_available = AsyncMock(return_value=False)
+
+    logs = []
+
+    async def on_log(m):
+        logs.append(m)
+
+    async def on_progress(d, t, s):
+        pass
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["a.bin", "b.bin", "c.bin"]
+        )
+        await download_hf(
+            "org/model",
+            Path("/tmp/dest"),
+            endpoint="https://hf.co",
+            token=None,
+            revision="main",
+            aria2=aria2,
+            connections=4,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+    assert aria2.is_available.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_ms_repo_exists_true():
     with patch("app.downloaders.modelscope.HubApi") as MockApi:
         MockApi.return_value.repo_exists = MagicMock(return_value=True)

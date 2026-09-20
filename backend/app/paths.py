@@ -1,3 +1,5 @@
+import errno
+import shutil
 from pathlib import Path
 
 
@@ -76,3 +78,30 @@ def ensure_under_model_root(model_root: str, path: str | Path) -> Path:
     if not target.is_relative_to(root):
         raise ValueError("目标路径超出 MODEL_ROOT")
     return target
+
+
+def free_space_bytes(path: str | Path) -> int:
+    """Free bytes on the filesystem backing ``path`` (nearest existing ancestor).
+
+    Returns -1 when it cannot be determined, so callers treat that as unknown.
+    """
+    probe = Path(path)
+    while probe.parent != probe and not probe.exists():
+        probe = probe.parent
+    try:
+        return int(shutil.disk_usage(probe).free)
+    except OSError:
+        return -1
+
+
+def disk_error_to_message(exc: OSError, path: str | Path) -> str | None:
+    """Map a write/permission OSError to a friendly, path-hinted message.
+
+    Returns ``None`` for unrelated OSErrors so callers keep their own handling.
+    """
+    code = getattr(exc, "errno", None)
+    if code in (errno.ENOSPC, errno.EDQUOT):
+        return f"磁盘空间不足，无法写入 {path}（请清理 MODEL_ROOT 后重试）"
+    if code in (errno.EACCES, errno.EPERM, errno.EROFS):
+        return f"目标路径无写入权限：{path}"
+    return None

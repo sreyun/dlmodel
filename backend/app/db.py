@@ -103,6 +103,26 @@ async def get_setting(key: str) -> str | None:
             return row["value"] if row else None
 
 
+async def get_many_settings(keys) -> dict[str, str]:
+    """Batch-read settings with a single connection/query.
+
+    Returns only the keys that exist (missing keys are absent), matching the
+    ``None`` semantics of repeated :func:`get_setting` calls for the callers.
+    """
+    keys = list(keys)
+    if not keys:
+        return {}
+    placeholders = ", ".join("?" for _ in keys)
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+            keys,
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {row["key"]: row["value"] for row in rows}
+
+
 async def set_setting(key: str, value: str) -> None:
     async with aiosqlite.connect(_DB_PATH) as db:
         await db.execute(

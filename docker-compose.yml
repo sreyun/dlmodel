@@ -46,6 +46,12 @@ services:
     depends_on:
       aria2:
         condition: service_started
+    # Conservative hardening: block setuid/setgid escalation. We intentionally
+    # keep the web process running as root (uid 0) because aria2 shares the same
+    # /models mount with PUID/PGID defaulting to 0; a non-root web user would
+    # cause permission mismatches on files the two services alternately write.
+    security_opt:
+      - no-new-privileges:true
     networks: [dlmodel]
     restart: unless-stopped
     healthcheck:

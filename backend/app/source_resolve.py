@@ -27,10 +27,12 @@ async def resolve_source(
         return [source]
 
     # Prefer ModelScope when present, but always keep Hugging Face as download fallback.
+    # A transient probe error must not fail resolution: treat "unknown" as present so
+    # the source stays in the attempt order and the download loop can still fall back.
     order: list[str] = []
-    if await ms_exists(name):
+    if await _safe_exists(ms_exists, name):
         order.append("modelscope")
-    if await hf_exists(name):
+    if await _safe_exists(hf_exists, name):
         order.append("huggingface")
     if not order:
         return ["modelscope", "huggingface"]
@@ -38,3 +40,10 @@ async def resolve_source(
         if candidate not in order:
             order.append(candidate)
     return order
+
+
+async def _safe_exists(probe, name: str) -> bool:
+    try:
+        return bool(await probe(name))
+    except Exception:
+        return True

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_admin
 from app.config import get_settings, optional_secret
-from app.db import delete_setting, get_setting, set_setting
+from app.db import delete_setting, get_many_settings, set_setting
 from app.notify import send_robot_message, validate_webhook_url
 
 router = APIRouter()
@@ -176,8 +176,9 @@ async def effective_settings() -> dict:
             out[key] = _BOOL_DEFAULTS[key]
         else:
             out[key] = None
+    stored = await get_many_settings(_MERGE_KEYS)
     for key in _MERGE_KEYS:
-        raw = await get_setting(key)
+        raw = stored.get(key)
         if not _usable_override(key, raw):
             continue
         out[key] = _coerce(key, raw)
@@ -237,10 +238,11 @@ def public_settings(merged: dict) -> dict:
 
 
 async def apply_sqlite_overrides() -> None:
+    stored = await get_many_settings(_ENV_NAMES.keys())
     for key, env_name in _ENV_NAMES.items():
         if key in _TOKEN_KEYS or key in _WEBHOOK_KEYS:
             continue
-        raw = await get_setting(key)
+        raw = stored.get(key)
         if not _usable_override(key, raw):
             continue
         os.environ[env_name] = str(raw)

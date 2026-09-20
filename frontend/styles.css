@@ -24,7 +24,7 @@
   --shadow-sm: 0 4px 12px rgba(15, 35, 45, 0.05);
   --radius: 14px;
   --radius-sm: 10px;
-  --font: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+  --font: "IBM Plex Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
 }
 
 * { box-sizing: border-box; }

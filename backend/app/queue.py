@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from app.aria2_client import Aria2Client
@@ -23,7 +24,14 @@ from app.downloaders import (
 )
 from app.downloaders.hf import DownloadRemoved
 from app.models_schema import DownloadCreate
-from app.paths import ensure_under_model_root, hf_model_dir, ollama_root, parse_model_name
+from app.paths import (
+    disk_error_to_message,
+    ensure_under_model_root,
+    free_space_bytes,
+    hf_model_dir,
+    ollama_root,
+    parse_model_name,
+)
 from app.routes.settings import effective_settings
 from app.source_resolve import resolve_source
 
@@ -75,7 +83,6 @@ class DownloadQueue:
         )
         self._pending: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
-        self._next_worker_id = 0
         self._cancel_flags: dict[str, asyncio.Event] = {}
         self._subscribers: dict[str, list[asyncio.Queue]] = {}
         self._task_gids: dict[str, list[str]] = {}
@@ -129,8 +136,10 @@ class DownloadQueue:
         return len(rows)
 
     def _spawn_worker(self) -> None:
-        worker_id = self._next_worker_id
-        self._next_worker_id += 1
+        # Slot index == current worker count so a down-then-up resize reuses ids
+        # instead of letting them grow past concurrency (which made new workers
+        # immediately hit the ``worker_id >= concurrency`` exit and die).
+        worker_id = len(self._workers)
         self._workers.append(asyncio.create_task(self._worker(worker_id)))
 
     async def resize(self, concurrency: int) -> None:
@@ -374,6 +383,8 @@ class DownloadQueue:
             )
             return
 
+        progress_state = {"ts": 0.0, "bytes": -1}
+
         async def on_progress(
             progress_bytes: int,
             total_bytes: int | None,
@@ -382,13 +393,30 @@ class DownloadQueue:
             if cancelled.is_set():
                 await self._remove_aria2_gids(task_id)
                 raise DownloadCancelled()
-            await update_active_task(
-                task_id,
-                progress_bytes=progress_bytes,
-                total_bytes=total_bytes,
-                speed_bps=speed_bps,
+            # Persist/publish at most every ~0.5s or per 1 MB moved, but always the
+            # first update and the final/complete ones so a finished row is exact.
+            # HTTP fallback fires per network chunk; without this it would commit to
+            # SQLite (plus a publish read) thousands of times per large file.
+            now = time.monotonic()
+            done = int(progress_bytes or 0)
+            finished = total_bytes is not None and done >= int(total_bytes) > 0
+            due = (
+                progress_state["ts"] == 0.0
+                or (now - progress_state["ts"]) >= 0.5
+                or (done - progress_state["bytes"]) >= (1024 * 1024)
+                or speed_bps in (0, 0.0)
+                or finished
             )
-            await self._publish(task_id)
+            if due:
+                progress_state["ts"] = now
+                progress_state["bytes"] = done
+                await update_active_task(
+                    task_id,
+                    progress_bytes=progress_bytes,
+                    total_bytes=total_bytes,
+                    speed_bps=speed_bps,
+                )
+                await self._publish(task_id)
             # Defer "started" notify until we have real transfer stats (rate/ETA).
             if task_id not in self._started_notified and (
                 (speed_bps is not None and float(speed_bps) > 0)
@@ -460,14 +488,30 @@ class DownloadQueue:
     async def _run_download(self, task, on_progress, on_log, cancelled) -> None:
         settings = await effective_settings()
         model_root = get_settings().model_root
+        ms_cache: dict[str, bool] = {}
+        hf_cache: dict[str, bool] = {}
 
         async def ms_exists(name: str) -> bool:
-            return await ms_repo_exists(name, settings["modelscope_api_token"])
+            if name not in ms_cache:
+                try:
+                    ms_cache[name] = await ms_repo_exists(
+                        name, settings["modelscope_api_token"]
+                    )
+                except Exception:
+                    # Transient probe error: assume present so the download loop
+                    # still attempts it and can fall back to another source.
+                    ms_cache[name] = True
+            return ms_cache[name]
 
         async def hf_exists(name: str) -> bool:
-            return await hf_repo_exists(
-                name, settings["hf_endpoint"], settings["hf_token"]
-            )
+            if name not in hf_cache:
+                try:
+                    hf_cache[name] = await hf_repo_exists(
+                        name, settings["hf_endpoint"], settings["hf_token"]
+                    )
+                except Exception:
+                    hf_cache[name] = True
+            return hf_cache[name]
 
         sources = await resolve_source(
             task["name"],
@@ -490,6 +534,7 @@ class DownloadQueue:
                         continue
                     found_any = True
                     dest = ensure_under_model_root(model_root, task["dest_path"])
+                    self._check_dest_writable(dest)
                     dest_key = str(dest)
                     if dest_key in self._busy_dests:
                         raise RuntimeError("目标目录仍有未结束的下载，请稍后再试")
@@ -516,6 +561,7 @@ class DownloadQueue:
                         continue
                     found_any = True
                     dest = ensure_under_model_root(model_root, task["dest_path"])
+                    self._check_dest_writable(dest)
                     dest_key = str(dest)
                     if dest_key in self._busy_dests:
                         raise RuntimeError("目标目录仍有未结束的下载，请稍后再试")
@@ -565,6 +611,16 @@ class DownloadQueue:
             raise RuntimeError(f"在尝试的源中未找到模型（已尝试：{tried}）")
         raise RuntimeError("；".join(errors) if errors else "下载失败")
 
+    def _check_dest_writable(self, dest: Path) -> None:
+        """Fail fast (with a path hint) on a full or non-writable target dir."""
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            message = disk_error_to_message(exc, dest)
+            raise RuntimeError(message or f"无法创建目标目录：{dest}（{exc}）") from exc
+        if free_space_bytes(dest) == 0:
+            raise RuntimeError(f"磁盘空间不足：{dest} 所在分区已满（请清理 MODEL_ROOT）")
+
     def _aria2_for_task(self, task_id: str) -> _GidTrackingAria2 | None:
         if self._aria2 is None:
             return None
@@ -609,6 +665,12 @@ class DownloadQueue:
 
     async def _finish_if_active(self, task_id: str, *, status: str, **fields) -> None:
         changed = await update_active_task(task_id, status=status, **fields)
+        if status in _TERMINAL:
+            # Worker is done with this task; drop in-memory bookkeeping so these
+            # dicts do not grow with every task the long-lived queue serves.
+            self._cancel_flags.pop(task_id, None)
+            self._task_gids.pop(task_id, None)
+            self._started_notified.discard(task_id)
         if not changed:
             return
         await self._publish(task_id)
@@ -625,6 +687,9 @@ class DownloadQueue:
             await self._schedule_notify(task_id, status)
 
     async def _publish(self, task_id: str) -> None:
+        if not self._subscribers.get(task_id):
+            # No SSE consumers (UI polls); skip the extra DB read per progress tick.
+            return
         row = await get_task(task_id)
         if row is None:
             return

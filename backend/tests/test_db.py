@@ -1,6 +1,14 @@
 import pytest
 
-from app.db import get_setting, get_task, init_db, insert_task, set_setting, update_task
+from app.db import (
+    get_many_settings,
+    get_setting,
+    get_task,
+    init_db,
+    insert_task,
+    set_setting,
+    update_task,
+)
 
 
 @pytest.fixture
@@ -14,6 +22,24 @@ async def db(tmp_path):
 async def test_settings_roundtrip(db):
     await set_setting("hf_endpoint", "https://hf-mirror.com")
     assert await get_setting("hf_endpoint") == "https://hf-mirror.com"
+
+
+@pytest.mark.asyncio
+async def test_get_many_settings_batch(db):
+    await set_setting("hf_endpoint", "https://hf-mirror.com")
+    await set_setting("download_concurrency", "4")
+    got = await get_many_settings(
+        ["hf_endpoint", "download_concurrency", "hf_token", "missing_key"]
+    )
+    # Existing keys return values; absent keys are omitted (caller maps to None).
+    assert got == {"hf_endpoint": "https://hf-mirror.com", "download_concurrency": "4"}
+    assert "hf_token" not in got
+    assert "missing_key" not in got
+
+
+@pytest.mark.asyncio
+async def test_get_many_settings_empty(db):
+    assert await get_many_settings([]) == {}
 
 
 @pytest.mark.asyncio

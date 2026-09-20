@@ -16,6 +16,7 @@
 ## 功能概览
 
 - **下载**：自动源（优先魔搭，回落 HF 镜像）、指定 ModelScope / HF / Ollama；队列并发、进度 / 速率 / ETA
+  - 进度更新采用前端 **短轮询**（活跃 1s、空闲 4s）。后端保留了 SSE 端点 `GET /api/downloads/{id}/events`（仅支持 `Authorization: Bearer`，无查询串 Token），但浏览器原生 `EventSource` 无法携带该请求头，故当前前端未使用；如要启用需改用 `fetch` + ReadableStream。
 - **落盘**：HF / vLLM → `{MODEL_ROOT}/hf/<org>/<repo>/`；Ollama → `{MODEL_ROOT}/ollama`
 - **持久化**：SQLite（`{DATA_DIR}/app.db`）；优雅重启时进行中的任务会 **停放并恢复**，不会被取消
 - **设置**：HF / ModelScope Token、并发与镜像地址；消息推送 Webhook（脱敏回显，明文不回传）

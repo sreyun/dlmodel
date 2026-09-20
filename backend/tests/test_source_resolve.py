@@ -40,3 +40,23 @@ async def test_forced_source():
     async def hf_ok(n): return False
     order = await resolve_source("x/y", "huggingface", "vllm", ms_exists=ms_ok, hf_exists=hf_ok)
     assert order == ["huggingface"]
+
+
+@pytest.mark.asyncio
+async def test_auto_survives_probe_errors():
+    # A transient probe error must not fail resolution; "unknown" is kept so the
+    # download loop can still attempt the source and fall back.
+    async def ms_boom(n): raise RuntimeError("network")
+    async def hf_boom(n): raise RuntimeError("network")
+    order = await resolve_source("Qwen/Qwen2.5", "auto", "vllm", ms_exists=ms_boom, hf_exists=hf_boom)
+    assert order[0] == "modelscope"
+    assert "huggingface" in order
+
+
+@pytest.mark.asyncio
+async def test_auto_ms_error_does_not_drop_hf():
+    async def ms_boom(n): raise RuntimeError("network")
+    async def hf_false(n): return False
+    order = await resolve_source("x/y", "auto", "vllm", ms_exists=ms_boom, hf_exists=hf_false)
+    assert "modelscope" in order  # unknown -> kept as candidate
+    assert "huggingface" in order  # always retained as fallback

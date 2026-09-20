@@ -2,6 +2,10 @@ import uuid
 
 import httpx
 
+# Fast probe so an unreachable aria2 falls back to HTTP quickly instead of
+# stalling on the client's default (longer) read/connect timeouts.
+_PROBE_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=5.0)
+
 
 class Aria2Client:
     def __init__(
@@ -27,14 +31,21 @@ class Aria2Client:
             return [f"token:{self._secret}", *args]
         return list(args)
 
-    async def _call(self, method: str, params: list[object]) -> object:
+    async def _call(
+        self, method: str, params: list[object], *, timeout: httpx.Timeout | None = None
+    ) -> object:
         body = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),
             "method": method,
             "params": params,
         }
-        resp = await self._client.post(self._rpc_url, json=body)
+        # Only pass timeout when set: httpx treats an explicit ``None`` as
+        # "no timeout" rather than "use the client default".
+        if timeout is not None:
+            resp = await self._client.post(self._rpc_url, json=body, timeout=timeout)
+        else:
+            resp = await self._client.post(self._rpc_url, json=body)
         resp.raise_for_status()
         data = resp.json()
         if "error" in data:
@@ -46,7 +57,9 @@ class Aria2Client:
 
     async def is_available(self) -> bool:
         try:
-            await self._call("aria2.getVersion", self._auth_params())
+            await self._call(
+                "aria2.getVersion", self._auth_params(), timeout=_PROBE_TIMEOUT
+            )
             return True
         except Exception:
             return False

@@ -11,11 +11,18 @@ import httpx
 
 from app.downloaders.base import LogCallback, ProgressCallback
 from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
+from app.paths import disk_error_to_message
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
 _LIMITS = httpx.Limits(max_keepalive_connections=4, max_connections=8, keepalive_expiry=30.0)
+
+
+def _disk_error(exc: OSError, dest: Path) -> BaseException:
+    """Turn ENOSPC / EACCES write failures into a friendly, path-hinted error."""
+    message = disk_error_to_message(exc, dest)
+    return RuntimeError(message) if message else exc
 
 
 def _parse_total(resp: httpx.Response, *, existing: int, resumed: bool) -> int | None:
@@ -77,17 +84,30 @@ async def _http_download_once(
             last_time = time.monotonic()
             last_bytes = downloaded
 
-            with dest.open(mode) as f:
-                async for chunk in resp.aiter_bytes():
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    now = time.monotonic()
-                    speed: float | None = None
-                    if now - last_time >= 0.5:
-                        speed = (downloaded - last_bytes) / (now - last_time)
-                        last_time = now
-                        last_bytes = downloaded
-                    await on_progress(downloaded, total, speed)
+            # Buffer and write off the event loop so a multi-GB download does not
+            # block other workers / request handlers on synchronous per-chunk I/O.
+            buffer = bytearray()
+            flush_at = 256 * 1024
+            try:
+                with dest.open(mode) as f:
+                    async for chunk in resp.aiter_bytes():
+                        buffer += chunk
+                        downloaded += len(chunk)
+                        if len(buffer) >= flush_at:
+                            await asyncio.to_thread(f.write, bytes(buffer))
+                            buffer.clear()
+                        now = time.monotonic()
+                        speed: float | None = None
+                        if now - last_time >= 0.5:
+                            speed = (downloaded - last_bytes) / (now - last_time)
+                            last_time = now
+                            last_bytes = downloaded
+                        await on_progress(downloaded, total, speed)
+                    if buffer:
+                        await asyncio.to_thread(f.write, bytes(buffer))
+                        buffer.clear()
+            except OSError as exc:
+                raise _disk_error(exc, dest) from exc
 
     await on_progress(downloaded, total, 0.0)
 
@@ -115,7 +135,7 @@ async def http_download(
             delay = retry_backoff_seconds(attempt)
             msg = (
                 f"网络中断（{exc}），{delay:.0f}s 后重试 "
-                f"（{attempt + 1}/{attempts - 1}）…"
+                f"（第 {attempt + 2}/{attempts} 次尝试）…"
             )
             logger.warning(
                 "http_download retry url=%s attempt=%s err=%s", url, attempt + 1, exc

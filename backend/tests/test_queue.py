@@ -556,3 +556,93 @@ async def test_started_notify_waits_for_progress_stats(tmp_path, monkeypatch):
     gate.set()
     await _wait_status(tid, "completed", "failed", "cancelled")
     await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_resize_down_then_up_restores_concurrency(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+
+    def alive():
+        return sum(1 for w in q._workers if not w.done())
+
+    q = DownloadQueue(concurrency=2)
+    await q.start()
+    assert alive() == 2
+
+    await q.resize(1)
+    for _ in range(60):  # surplus worker exits on its next loop check (<=1s)
+        if alive() == 1:
+            break
+        await asyncio.sleep(0.05)
+    assert alive() == 1
+
+    # Regression: with monotonic worker ids the freshly spawned workers would be
+    # numbered past concurrency and exit immediately, so this never reached 3.
+    await q.resize(3)
+    for _ in range(60):
+        if alive() == 3:
+            break
+        await asyncio.sleep(0.05)
+    assert alive() == 3
+    await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_progress_throttle_reduces_db_writes(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    import app.queue as queue_mod
+
+    writes = {"n": 0}
+    real_update = queue_mod.update_active_task
+
+    async def counting_update(task_id, **fields):
+        if "progress_bytes" in fields:
+            writes["n"] += 1
+        return await real_update(task_id, **fields)
+
+    monkeypatch.setattr(queue_mod, "update_active_task", counting_update)
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        # 40 tiny (<1 MB), fast increments with a live speed: only the first and
+        # the completing update should be persisted, not all 41.
+        for i in range(1, 41):
+            await on_progress(i * 1000, 100_000, 1_000_000)
+        await on_progress(100_000, 100_000, 1_000_000)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    row = await _wait_status(tid, "completed", "failed")
+    await q.stop()
+    assert row["status"] == "completed"
+    assert writes["n"] <= 10  # unthrottled this would be ~41
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_clears_inmemory_bookkeeping(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(100, 100, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    assert tid in q._cancel_flags
+    await _wait_status(tid, "completed", "failed")
+    for _ in range(40):
+        if tid not in q._cancel_flags and tid not in q._task_gids:
+            break
+        await asyncio.sleep(0.05)
+    await q.stop()
+    assert tid not in q._cancel_flags
+    assert tid not in q._task_gids

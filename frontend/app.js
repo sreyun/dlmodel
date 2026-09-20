@@ -1,4 +1,11 @@
 const TOKEN_KEY = "dlmodel_token";
+// Enable the deferred Google Fonts sheet after first paint. It ships as
+// media="print" so it never blocks initial render on slow/blocked networks;
+// the CSP forbids inline onload handlers, so we flip media here.
+(() => {
+  const gfonts = document.getElementById("gfonts");
+  if (gfonts) gfonts.media = "all";
+})();
 const ROUTES = ["download", "tasks", "library", "services", "settings"];
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const PAGE_TITLE = {
