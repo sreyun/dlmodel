@@ -69,7 +69,7 @@ services:
     logging: *json-log
 
   aria2:
-    image: ${ARIA2_IMAGE:-p3terx/aria2-pro:latest}
+    image: ${ARIA2_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io/p3terx/aria2-pro:latest}
     environment:
       RPC_SECRET: ${ARIA2_RPC_SECRET:-dlmodel}
       RPC_PORT: 6800
