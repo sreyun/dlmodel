@@ -16,6 +16,8 @@
 ## 功能概览
 
 - **下载**：自动源（优先魔搭，回落 HF 镜像）、指定 ModelScope / HF / Ollama；队列并发、进度 / 速率 / ETA
+- **暂停 / 恢复**：任务状态机含 `paused`。暂停是协作式「安全停止网络流」而非取消或失败——保留任务记录、已下载文件、断点、进度、目标路径与日志，恢复后从断点续传（aria2 `continue` / HTTP `Range` / SDK 续用 `.temp` / Ollama 服务端缓存）。接口 `POST /api/downloads/{id}/pause` 与 `…/resume`；`paused` 可直接取消或删除
+  - ModelScope 限制：底层 `snapshot_download` 在阻塞线程中运行，无法即时中断，暂停时改为「停止跟踪并落 `paused`」，后台线程结束后释放目标目录。因此对同一 ModelScope 目标目录立即恢复可能因残留写入被 fail-fast 拒绝（「目标目录仍有未结束的下载」），以防并发双写损坏，稍候重试即可
   - 进度更新采用前端 **短轮询**（活跃 1s、空闲 4s）。后端保留了 SSE 端点 `GET /api/downloads/{id}/events`（仅支持 `Authorization: Bearer`，无查询串 Token），但浏览器原生 `EventSource` 无法携带该请求头，故当前前端未使用；如要启用需改用 `fetch` + ReadableStream。
 - **落盘**：HF / vLLM → `{MODEL_ROOT}/hf/<org>/<repo>/`；Ollama → `{MODEL_ROOT}/ollama`
 - **持久化**：SQLite（`{DATA_DIR}/app.db`）；优雅重启时进行中的任务会 **停放并恢复**，不会被取消

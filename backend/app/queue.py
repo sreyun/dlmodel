@@ -14,6 +14,7 @@ from app.db import (
     list_tasks_by_status,
     update_active_task,
     update_task,
+    update_task_if_in,
 )
 from app.downloaders import (
     download_hf,
@@ -22,7 +23,11 @@ from app.downloaders import (
     hf_repo_exists,
     ms_repo_exists,
 )
-from app.downloaders.hf import DownloadRemoved
+from app.downloaders.base import (
+    DownloadCancelled,
+    DownloadPaused,
+    DownloadRemoved,
+)
 from app.models_schema import DownloadCreate
 from app.paths import (
     disk_error_to_message,
@@ -43,12 +48,18 @@ _SOURCE_ZH = {
     "modelscope": "ModelScope",
     "ollama": "Ollama",
 }
+_STATUS_ZH = {
+    "queued": "排队中",
+    "running": "下载中",
+    "paused": "已暂停",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
 _SHUTDOWN_MSG = "服务关闭，下次启动后继续…"
 _RECOVER_MSG = "服务重启后重新排队…"
-
-
-class DownloadCancelled(Exception):
-    """Raised when the user cancels an in-flight download."""
+_PAUSED_MSG = "已暂停"
+_RESUME_MSG = "已恢复，等待调度…"
 
 
 class _GidTrackingAria2:
@@ -84,6 +95,7 @@ class DownloadQueue:
         self._pending: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._cancel_flags: dict[str, asyncio.Event] = {}
+        self._pause_flags: dict[str, asyncio.Event] = {}
         self._subscribers: dict[str, list[asyncio.Queue]] = {}
         self._task_gids: dict[str, list[str]] = {}
         self._started = False
@@ -190,6 +202,7 @@ class DownloadQueue:
                 await asyncio.gather(*self._workers, return_exceptions=True)
             self._workers = []
             self._cancel_flags.clear()
+            self._pause_flags.clear()
             self._task_gids.clear()
             self._busy_dests.clear()
             self._started_notified.clear()
@@ -247,16 +260,97 @@ class DownloadQueue:
         return task_id
 
     async def cancel(self, task_id: str) -> None:
+        row = await get_task(task_id)
         flag = self._cancel_flags.setdefault(task_id, asyncio.Event())
         flag.set()
-        # Mark cancelled before tearing down transports so races land as cancelled.
-        changed = await update_active_task(
-            task_id, status="cancelled", message=self._cancel_message()
+        # A pending pause flag must not let a resuming worker ignore the cancel.
+        pause_flag = self._pause_flags.get(task_id)
+        if pause_flag is not None:
+            pause_flag.set()
+        # Include paused: a paused row owns no in-flight worker, so the CAS writes
+        # the terminal state directly; a running row is still covered by the flag.
+        changed = await update_task_if_in(
+            task_id,
+            ("queued", "running", "paused"),
+            status="cancelled",
+            message=self._cancel_message(),
         )
         await self._remove_aria2_gids(task_id)
         if changed:
             await self._publish(task_id)
             logger.info("cancelled task id=%s", task_id[:8])
+        if row is not None and row["status"] == "paused":
+            # No worker will run this task's finish path, so release tracking here.
+            self._release_task(task_id)
+
+    def _release_task(self, task_id: str) -> None:
+        """Drop all in-memory bookkeeping for a task that owns no live worker.
+
+        Used when a task reaches a terminal state or a durable paused state so the
+        long-lived queue does not leak per-task dicts/sets. Never touches disk.
+        """
+        self._cancel_flags.pop(task_id, None)
+        self._pause_flags.pop(task_id, None)
+        self._task_gids.pop(task_id, None)
+        self._started_notified.discard(task_id)
+
+    async def pause(self, task_id: str) -> None:
+        row = await get_task(task_id)
+        if row is None:
+            raise ValueError("下载任务不存在")
+        status = row["status"]
+        if status in _TERMINAL:
+            raise ValueError(
+                f"无法暂停处于「{_STATUS_ZH.get(status, status)}」状态的任务"
+            )
+        if status == "paused":
+            return  # idempotent
+        # Signal first, then CAS: a running worker keeps transferring until its next
+        # progress tick, where the flag makes it stop the stream and land on paused.
+        self._pause_flags.setdefault(task_id, asyncio.Event()).set()
+        changed = await update_task_if_in(
+            task_id,
+            ("queued", "running"),
+            status="paused",
+            speed_bps=None,
+            message=_PAUSED_MSG,
+        )
+        if not changed:
+            # Worker finished (completed/failed/cancelled) between read and CAS; its
+            # own finish path already published the authoritative state.
+            return
+        await self._remove_aria2_gids(task_id)
+        await self._publish(task_id)
+        logger.info("paused task id=%s", task_id[:8])
+
+    async def resume(self, task_id: str) -> None:
+        row = await get_task(task_id)
+        if row is None:
+            raise ValueError("下载任务不存在")
+        if row["status"] != "paused":
+            raise ValueError(
+                f"无法恢复处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务"
+            )
+        if row["target"] == "vllm" and row.get("dest_path") in self._busy_dests:
+            raise ValueError("目标目录仍有未结束的下载，请稍后再试")
+        # CAS paused -> queued; progress_bytes is preserved so downloaders resume
+        # in place (aria2 continue / HTTP Range / SDK temp dirs).
+        changed = await update_task_if_in(
+            task_id,
+            ("paused",),
+            status="queued",
+            speed_bps=None,
+            message=_RESUME_MSG,
+        )
+        if not changed:
+            raise ValueError("任务状态已变化，请刷新后重试")
+        # Clear stale pause/cancel flags and gid bookkeeping before requeueing.
+        self._release_task(task_id)
+        self._cancel_flags[task_id] = asyncio.Event()
+        self._task_gids[task_id] = []
+        await self._pending.put(task_id)
+        await self._publish(task_id)
+        logger.info("resumed task id=%s", task_id[:8])
 
     async def retry(self, task_id: str) -> None:
         row = await get_task(task_id)
@@ -279,6 +373,7 @@ class DownloadQueue:
         if not claimed:
             return
         self._cancel_flags[task_id] = asyncio.Event()
+        self._pause_flags.pop(task_id, None)
         self._task_gids[task_id] = []
         self._started_notified.discard(task_id)
         await self._pending.put(task_id)
@@ -333,6 +428,16 @@ class DownloadQueue:
                     )
                 except Exception:
                     logger.exception("cancel finish failed id=%s", task_id[:8])
+            except DownloadPaused:
+                try:
+                    await self._finish_if_active(
+                        task_id,
+                        status="paused",
+                        message=_PAUSED_MSG,
+                        speed_bps=None,
+                    )
+                except Exception:
+                    logger.exception("pause finish failed id=%s", task_id[:8])
             except Exception as exc:
                 try:
                     if self._cancel_flags.get(task_id) and self._cancel_flags[task_id].is_set():
@@ -359,9 +464,17 @@ class DownloadQueue:
             return
 
         cancelled = self._cancel_flags.setdefault(task_id, asyncio.Event())
+        paused = self._pause_flags.setdefault(task_id, asyncio.Event())
         if cancelled.is_set() or row["status"] in _TERMINAL:
             await self._finish_if_active(
                 task_id, status="cancelled", message=self._cancel_message()
+            )
+            return
+        if row["status"] == "paused" or paused.is_set():
+            # The task was paused while still queued (its id is already in _pending);
+            # do not start it — re-park as paused with progress untouched.
+            await self._finish_if_active(
+                task_id, status="paused", message=_PAUSED_MSG, speed_bps=None
             )
             return
 
@@ -393,6 +506,9 @@ class DownloadQueue:
             if cancelled.is_set():
                 await self._remove_aria2_gids(task_id)
                 raise DownloadCancelled()
+            if paused.is_set():
+                await self._remove_aria2_gids(task_id)
+                raise DownloadPaused()
             # Persist/publish at most every ~0.5s or per 1 MB moved, but always the
             # first update and the final/complete ones so a finished row is exact.
             # HTTP fallback fires per network chunk; without this it would commit to
@@ -429,6 +545,9 @@ class DownloadQueue:
         async def on_log(message: str) -> None:
             if cancelled.is_set():
                 return
+            if paused.is_set():
+                await self._remove_aria2_gids(task_id)
+                raise DownloadPaused()
             await update_active_task(task_id, message=message)
             await self._publish(task_id)
 
@@ -442,6 +561,11 @@ class DownloadQueue:
         except DownloadCancelled:
             await self._finish_if_active(
                 task_id, status="cancelled", message=self._cancel_message()
+            )
+            return
+        except DownloadPaused:
+            await self._finish_if_active(
+                task_id, status="paused", message=_PAUSED_MSG, speed_bps=None
             )
             return
         except DownloadRemoved:
@@ -486,6 +610,9 @@ class DownloadQueue:
         )
 
     async def _run_download(self, task, on_progress, on_log, cancelled) -> None:
+        # Pause is observed via the shared per-task flag (created by _process) so
+        # the runner signature stays 4-positional (existing test doubles rely on it).
+        paused = self._pause_flags.get(task["id"])
         settings = await effective_settings()
         model_root = get_settings().model_root
         ms_cache: dict[str, bool] = {}
@@ -526,6 +653,8 @@ class DownloadQueue:
         for source in sources:
             if cancelled.is_set():
                 raise DownloadCancelled()
+            if paused is not None and paused.is_set():
+                raise DownloadPaused()
             label = _SOURCE_ZH.get(source, source)
             try:
                 if source == "huggingface":
@@ -594,6 +723,8 @@ class DownloadQueue:
                 errors.append(f"{label}：未知下载源")
             except DownloadCancelled:
                 raise
+            except DownloadPaused:
+                raise
             except DownloadRemoved:
                 raise
             except asyncio.CancelledError:
@@ -606,6 +737,8 @@ class DownloadQueue:
 
         if cancelled.is_set():
             raise DownloadCancelled()
+        if paused is not None and paused.is_set():
+            raise DownloadPaused()
         if not found_any:
             tried = "、".join(_SOURCE_ZH.get(s, s) for s in sources)
             raise RuntimeError(f"在尝试的源中未找到模型（已尝试：{tried}）")
@@ -665,16 +798,16 @@ class DownloadQueue:
 
     async def _finish_if_active(self, task_id: str, *, status: str, **fields) -> None:
         changed = await update_active_task(task_id, status=status, **fields)
-        if status in _TERMINAL:
+        if status in _TERMINAL or status == "paused":
             # Worker is done with this task; drop in-memory bookkeeping so these
             # dicts do not grow with every task the long-lived queue serves.
-            self._cancel_flags.pop(task_id, None)
-            self._task_gids.pop(task_id, None)
-            self._started_notified.discard(task_id)
+            # Paused owns no live worker until resume, so its flags are released
+            # here and re-created on resume. Disk artifacts are never touched.
+            self._release_task(task_id)
         if not changed:
             return
         await self._publish(task_id)
-        if status in ("completed", "failed", "cancelled", "running"):
+        if status in ("completed", "failed", "cancelled", "running", "paused"):
             logger.info(
                 "task status id=%s status=%s message=%s",
                 task_id[:8],

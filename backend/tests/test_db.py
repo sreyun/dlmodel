@@ -1,6 +1,7 @@
 import pytest
 
 from app.db import (
+    find_active_task,
     get_many_settings,
     get_setting,
     get_task,
@@ -8,6 +9,7 @@ from app.db import (
     insert_task,
     set_setting,
     update_task,
+    update_task_if_in,
 )
 
 
@@ -58,3 +60,55 @@ async def test_task_insert_and_update(db):
     row = await get_task(tid)
     assert row["status"] == "running"
     assert row["progress_bytes"] == 10
+
+
+async def _insert(db, status):
+    return await insert_task(
+        {
+            "name": "org/m",
+            "source": "huggingface",
+            "target": "vllm",
+            "revision": None,
+            "status": status,
+            "dest_path": "/models/hf/org/m",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_task_if_in_allows_matching_transition(db):
+    tid = await _insert(db, "paused")
+    changed = await update_task_if_in(
+        tid, ("paused",), status="queued", speed_bps=None, message="resuming"
+    )
+    assert changed is True
+    row = await get_task(tid)
+    assert row["status"] == "queued"
+    assert row["message"] == "resuming"
+
+
+@pytest.mark.asyncio
+async def test_update_task_if_in_rejects_mismatched_status(db):
+    tid = await _insert(db, "completed")
+    changed = await update_task_if_in(
+        tid, ("queued", "running", "paused"), status="cancelled", message="x"
+    )
+    assert changed is False
+    row = await get_task(tid)
+    assert row["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_update_task_if_in_empty_expected_is_noop(db):
+    tid = await _insert(db, "queued")
+    assert await update_task_if_in(tid, (), status="paused") is False
+    assert (await get_task(tid))["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_find_active_task_includes_paused(db):
+    tid = await _insert(db, "paused")
+    active = await find_active_task("org/m", "vllm")
+    assert active is not None
+    assert active["id"] == tid
+    assert active["status"] == "paused"

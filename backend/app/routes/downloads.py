@@ -13,6 +13,7 @@ _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _STATUS_ZH = {
     "queued": "排队中",
     "running": "下载中",
+    "paused": "已暂停",
     "completed": "已完成",
     "failed": "失败",
     "cancelled": "已取消",
@@ -98,6 +99,40 @@ async def cancel_download(
     return _as_task(await _get_existing(task_id))
 
 
+@router.post("/api/downloads/{task_id}/pause")
+async def pause_download(
+    task_id: str, request: Request, _: None = Depends(require_admin)
+) -> TaskOut:
+    row = await _get_existing(task_id)
+    if row["status"] in _TERMINAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法暂停处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务",
+        )
+    try:
+        await request.app.state.queue.pause(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _as_task(await _get_existing(task_id))
+
+
+@router.post("/api/downloads/{task_id}/resume")
+async def resume_download(
+    task_id: str, request: Request, _: None = Depends(require_admin)
+) -> TaskOut:
+    row = await _get_existing(task_id)
+    if row["status"] != "paused":
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法恢复处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务",
+        )
+    try:
+        await request.app.state.queue.resume(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _as_task(await _get_existing(task_id))
+
+
 @router.post("/api/downloads/{task_id}/retry")
 async def retry_download(
     task_id: str, request: Request, _: None = Depends(require_admin)
@@ -120,12 +155,12 @@ async def delete_download(
     task_id: str, _: None = Depends(require_admin)
 ) -> dict:
     row = await _get_existing(task_id)
-    if row["status"] not in _TERMINAL:
+    if row["status"] not in _TERMINAL and row["status"] != "paused":
         raise HTTPException(
             status_code=400,
             detail=f"无法删除处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务，请先取消",
         )
-    deleted = await delete_task(task_id, statuses=tuple(_TERMINAL))
+    deleted = await delete_task(task_id, statuses=tuple(_TERMINAL | {"paused"}))
     if not deleted:
         raise HTTPException(status_code=409, detail="任务状态已变化，请刷新后重试")
     return {"ok": True, "id": task_id}

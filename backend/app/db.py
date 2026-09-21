@@ -224,13 +224,39 @@ async def claim_task_for_retry(task_id: str, **fields) -> bool:
         return cursor.rowcount > 0
 
 
+async def update_task_if_in(task_id: str, expected_statuses, **fields) -> bool:
+    """Compare-and-set status transition: update only if the row is currently in
+    one of ``expected_statuses``. Returns whether a row changed. Used for
+    pause / resume / cancel transitions that must not clobber a concurrent change.
+    """
+    expected = tuple(expected_statuses)
+    if not expected:
+        return False
+    if not fields:
+        return False
+
+    fields = _validate_fields(dict(fields))
+    fields["updated_at"] = _now_iso()
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    placeholders = ", ".join("?" for _ in expected)
+    values = list(fields.values()) + [task_id, *expected]
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            f"UPDATE tasks SET {assignments} "
+            f"WHERE id = ? AND status IN ({placeholders})",
+            values,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def find_active_task(name: str, target: str) -> dict | None:
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""
             SELECT {', '.join(_TASK_COLUMNS)} FROM tasks
-            WHERE name = ? AND target = ? AND status IN ('queued', 'running')
+            WHERE name = ? AND target = ? AND status IN ('queued', 'running', 'paused')
             ORDER BY created_at DESC LIMIT 1
             """,
             (name, target),

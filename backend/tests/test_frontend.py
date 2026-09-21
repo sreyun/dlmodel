@@ -64,6 +64,10 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "taskCard" in js.text
         assert "pairWarning" in js.text
         assert 'data-act="delete"' in js.text or "data-act=\"delete\"" in js.text
+        assert 'data-act="pause"' in js.text
+        assert 'data-act="resume"' in js.text
+        assert "已暂停" in js.text
+        assert '"paused"' in js.text
         assert "/api/downloads/cleanup" in js.text
         assert "clear-completed" in js.text
         assert 'class="btn' in js.text

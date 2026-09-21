@@ -19,6 +19,7 @@ const PAGE_TITLE = {
 const STATUS_LABEL = {
   queued: "排队中",
   running: "下载中",
+  paused: "已暂停",
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
@@ -207,6 +208,7 @@ function friendlyMessage(message, status) {
   if (!raw) {
     if (status === "queued") return "等待调度开始…";
     if (status === "running") return "正在准备下载…";
+    if (status === "paused") return "已暂停，进度已保留，可随时继续。";
     if (status === "completed") return "下载已完成，可在模型库中查看。";
     if (status === "cancelled") return "任务已取消。";
     return "";
@@ -245,7 +247,7 @@ function friendlyMessage(message, status) {
 }
 
 function taskSummary(tasks) {
-  const counts = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+  const counts = { queued: 0, running: 0, paused: 0, completed: 0, failed: 0, cancelled: 0 };
   tasks.forEach((t) => {
     if (counts[t.status] != null) counts[t.status] += 1;
   });
@@ -606,7 +608,15 @@ function renderDownload(gen) {
 
 function filterTasks(tasks, filter) {
   if (filter === "active") {
-    return tasks.filter((t) => t.status === "running" || t.status === "queued");
+    return tasks.filter(
+      (t) =>
+        t.status === "running" ||
+        t.status === "queued" ||
+        t.status === "paused",
+    );
+  }
+  if (filter === "paused") {
+    return tasks.filter((t) => t.status === "paused");
   }
   if (filter === "done") {
     return tasks.filter((t) => t.status === "completed");
@@ -620,7 +630,9 @@ function filterTasks(tasks, filter) {
 function taskCard(task) {
   const canCancel = !TERMINAL.has(task.status);
   const canRetry = task.status === "failed" || task.status === "cancelled";
-  const canDelete = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+  const canPause = task.status === "queued" || task.status === "running";
+  const canResume = task.status === "paused";
+  const canDelete = TERMINAL.has(task.status) || task.status === "paused";
   const pct = progressPct(task);
   const showSpeed = task.status === "running" || task.status === "queued";
   const eta = showSpeed
@@ -632,6 +644,7 @@ function taskCard(task) {
     task.status === "completed" ? "done" : "",
     task.status === "failed" ? "failed" : "",
     task.status === "cancelled" ? "cancelled" : "",
+    task.status === "paused" ? "paused" : "",
     (task.status === "running" || task.status === "queued") && pct == null
       ? "indeterminate"
       : "",
@@ -649,6 +662,7 @@ function taskCard(task) {
     msg &&
     (task.status === "running" ||
       task.status === "queued" ||
+      task.status === "paused" ||
       task.status === "failed" ||
       (task.status === "cancelled" && msg !== "任务已取消。"));
   return `<article class="task-card status-${esc(task.status)} ${task.status === "running" ? "is-running" : ""}" data-id="${esc(task.id)}">
@@ -665,6 +679,8 @@ function taskCard(task) {
         </div>
       </div>
       <div class="task-actions">
+        ${canPause ? `<button type="button" data-act="pause" data-id="${esc(task.id)}" title="暂停下载（保留进度，可恢复）">暂停</button>` : ""}
+        ${canResume ? `<button type="button" class="primary" data-act="resume" data-id="${esc(task.id)}" title="恢复下载">继续</button>` : ""}
         ${canCancel ? `<button type="button" data-act="cancel" data-id="${esc(task.id)}" title="取消下载">取消</button>` : ""}
         ${canRetry ? `<button type="button" class="primary" data-act="retry" data-id="${esc(task.id)}" title="重新加入队列">重试</button>` : ""}
         ${canDelete ? `<button type="button" class="danger" data-act="delete" data-id="${esc(task.id)}" data-name="${esc(task.name)}" title="删除任务记录（不删模型文件）">删除</button>` : ""}
@@ -695,8 +711,9 @@ function tasksFingerprint(tasks, filter) {
 
 function renderTaskFilterBar(counts) {
   const items = [
-    ["all", "全部", counts.queued + counts.running + counts.completed + counts.failed + counts.cancelled],
-    ["active", "进行中", counts.queued + counts.running],
+    ["all", "全部", counts.queued + counts.running + counts.paused + counts.completed + counts.failed + counts.cancelled],
+    ["active", "进行中", counts.queued + counts.running + counts.paused],
+    ["paused", "已暂停", counts.paused],
     ["done", "已完成", counts.completed],
     ["issue", "失败/取消", counts.failed + counts.cancelled],
   ];
@@ -751,6 +768,7 @@ async function refreshTasks(gen) {
         `
         <button type="button" class="stat clickable ${taskFilter === "active" ? "selected" : ""}" data-filter="active"><div class="label">进行中</div><div class="value accent">${counts.running}</div></button>
         <button type="button" class="stat clickable" data-filter="active"><div class="label">排队中</div><div class="value">${counts.queued}</div></button>
+        <button type="button" class="stat clickable ${taskFilter === "paused" ? "selected" : ""}" data-filter="paused"><div class="label">已暂停</div><div class="value">${counts.paused}</div></button>
         <button type="button" class="stat clickable ${taskFilter === "done" ? "selected" : ""}" data-filter="done"><div class="label">已完成</div><div class="value ok">${counts.completed}</div></button>
         <button type="button" class="stat clickable ${taskFilter === "issue" ? "selected" : ""}" data-filter="issue"><div class="label">失败 / 取消</div><div class="value danger">${counts.failed + counts.cancelled}</div></button>
       `,
@@ -926,6 +944,9 @@ function renderTasks(gen) {
       if (act === "cancel") {
         if (!confirm("确认取消该下载任务？进行中的传输将被中断。")) return;
       }
+      if (act === "pause") {
+        if (!confirm("确认暂停该下载任务？已下载进度会保留，可随时继续。")) return;
+      }
       if (act === "delete") {
         const name = btn.getAttribute("data-name") || id;
         if (!confirm(`确认删除任务「${name}」？\n仅删除任务记录，不会删除已下载的模型文件。`)) return;
@@ -949,7 +970,15 @@ function renderTasks(gen) {
         }
         return;
       }
-      setBusy(btn, true, act === "cancel" ? "取消中…" : "重试中…");
+      const busyText =
+        act === "cancel"
+          ? "取消中…"
+          : act === "pause"
+            ? "暂停中…"
+            : act === "resume"
+              ? "恢复中…"
+              : "重试中…";
+      setBusy(btn, true, busyText);
       try {
         await guarded(
           async () => {

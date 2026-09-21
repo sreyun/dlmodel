@@ -646,3 +646,206 @@ async def test_terminal_task_clears_inmemory_bookkeeping(tmp_path, monkeypatch):
     await q.stop()
     assert tid not in q._cancel_flags
     assert tid not in q._task_gids
+
+
+@pytest.mark.asyncio
+async def test_pause_running_preserves_progress_and_paused(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    started = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(500, 1000, 10)
+        started.set()
+        while True:
+            await asyncio.sleep(0.02)
+            await on_progress(500, 1000, 10)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    q._task_gids[tid] = ["gid-xyz"]
+    await q.pause(tid)
+    row = await _wait_status(tid, "paused")
+    assert row["status"] == "paused"
+    assert row["progress_bytes"] == 500  # progress must survive a pause
+    assert row["total_bytes"] == 1000
+    assert "暂停" in row["message"]
+    # Paused releases in-memory tracking (flags + aria2 gids) without a worker leak.
+    for _ in range(40):
+        if (
+            tid not in q._cancel_flags
+            and tid not in q._pause_flags
+            and tid not in q._task_gids
+        ):
+            break
+        await asyncio.sleep(0.05)
+    assert tid not in q._cancel_flags
+    assert tid not in q._pause_flags
+    assert tid not in q._task_gids
+    await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_pause_then_cancel(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    started = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(300, 1000, 10)
+        started.set()
+        while True:
+            await asyncio.sleep(0.02)
+            await on_progress(300, 1000, 10)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await q.pause(tid)
+    assert (await _wait_status(tid, "paused"))["status"] == "paused"
+    await q.cancel(tid)
+    row = await _wait_status(tid, "cancelled")
+    assert row["status"] == "cancelled"
+    await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_pause_queued_then_resume_completes(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    block_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        if task["name"] == "block/er":
+            block_started.set()
+            await release.wait()
+            await on_progress(1, 1, 0)
+            return
+        await on_progress(100, 100, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    await q.enqueue(
+        DownloadCreate(name="block/er", source="huggingface", target="vllm")
+    )
+    await asyncio.wait_for(block_started.wait(), timeout=2)
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    await _wait_status(tid, "queued")
+    await q.pause(tid)
+    assert (await get_task(tid))["status"] == "paused"
+    await q.resume(tid)
+    row = await _wait_status(tid, "queued", "running")
+    assert row["status"] in ("queued", "running")
+    release.set()
+    final = await _wait_status(tid, "completed", "failed")
+    assert final["status"] == "completed"
+    await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_from_paused_requeues_and_runs(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    from app.db import insert_task
+
+    ran = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        ran.set()
+        await on_progress(100, 100, 0)
+
+    dest = str(tmp_path / "models" / "hf" / "org" / "m")
+    tid = await insert_task(
+        {
+            "name": "org/m",
+            "source": "huggingface",
+            "target": "vllm",
+            "status": "paused",
+            "dest_path": dest,
+            "message": "已暂停",
+        }
+    )
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    await asyncio.sleep(0.15)
+    assert not ran.is_set()  # start must not auto-run a paused row
+    await q.resume(tid)
+    await asyncio.wait_for(ran.wait(), timeout=2)
+    row = await _wait_status(tid, "completed", "failed")
+    assert row["status"] == "completed"
+    await q.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_and_resize_never_claim_paused(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    from app.db import insert_task, update_task
+
+    ran = asyncio.Event()
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        ran.set()
+        await on_progress(100, 100, 0)
+
+    dest = str(tmp_path / "models" / "hf" / "org" / "m")
+    tid = await insert_task(
+        {
+            "name": "org/m",
+            "source": "huggingface",
+            "target": "vllm",
+            "status": "paused",
+            "dest_path": dest,
+            "message": "已暂停",
+        }
+    )
+    await update_task(tid, progress_bytes=50)
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    await q.resize(3)
+    await asyncio.sleep(0.2)
+    assert not ran.is_set()
+    row = await get_task(tid)
+    assert row["status"] == "paused"
+    assert row["progress_bytes"] == 50
+    await q.stop()
+    # Graceful stop parks queued/running only; paused stays paused.
+    assert (await get_task(tid))["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_pause_and_resume_guard_invalid_states(tmp_path, monkeypatch):
+    await init_db(str(tmp_path / "app.db"))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+
+    async def fake_run(task, on_progress, on_log, cancelled):
+        await on_progress(100, 100, 0)
+
+    q = DownloadQueue(concurrency=1)
+    q._run_download = fake_run  # type: ignore
+    await q.start()
+    tid = await q.enqueue(
+        DownloadCreate(name="org/m", source="huggingface", target="vllm")
+    )
+    row = await _wait_status(tid, "completed", "failed")
+    assert row["status"] == "completed"
+    with pytest.raises(ValueError):
+        await q.pause(tid)
+    with pytest.raises(ValueError):
+        await q.resume(tid)
+    await q.stop()

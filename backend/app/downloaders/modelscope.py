@@ -9,7 +9,7 @@ from modelscope import snapshot_download
 from modelscope.hub.api import HubApi
 
 from app.config import get_settings, optional_secret
-from app.downloaders.base import LogCallback, ProgressCallback
+from app.downloaders.base import DownloadControl, LogCallback, ProgressCallback
 from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,10 @@ async def download_modelscope(
             )
             return
         except asyncio.CancelledError:
+            raise
+        except DownloadControl:
+            # cancel / pause: propagate; _download_modelscope_once already detached
+            # the blocking thread so partial files stay on disk for a later resume.
             raise
         except Exception as exc:
             last_exc = exc

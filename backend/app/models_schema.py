@@ -4,7 +4,9 @@ from pydantic import BaseModel, Field
 
 Source = Literal["auto", "modelscope", "huggingface", "ollama"]
 Target = Literal["vllm", "ollama"]
-TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+TaskStatus = Literal[
+    "queued", "running", "paused", "completed", "failed", "cancelled"
+]
 
 
 class DownloadCreate(BaseModel):

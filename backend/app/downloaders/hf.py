@@ -6,13 +6,18 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from app.aria2_client import Aria2Client
 from app.config import get_settings, optional_secret
-from app.downloaders.base import LogCallback, ProgressCallback
+from app.downloaders.base import (
+    DownloadControl,
+    DownloadRemoved,
+    LogCallback,
+    ProgressCallback,
+)
 from app.downloaders.sdk_fallback import http_download
 from app.paths import safe_path_under
 
-
-class DownloadRemoved(RuntimeError):
-    """aria2 download was force-removed (typically user cancel)."""
+# ``DownloadRemoved`` is re-exported here for backward compatibility: existing
+# callers (and tests) import it from ``app.downloaders.hf``.
+__all__ = ["hf_repo_exists", "download_hf", "DownloadRemoved"]
 
 
 async def hf_repo_exists(name: str, endpoint: str, token: str | None) -> bool:
@@ -115,7 +120,9 @@ async def _download_hf_file(
                 max_tries=max(1, retries + 1),
             )
             return
-        except DownloadRemoved:
+        except DownloadControl:
+            # cancel / pause / aria2-removed must not be mistaken for an aria2
+            # failure and silently retried over HTTP; propagate to the queue.
             raise
         except Exception as exc:
             await on_log(f"aria2 下载 {filename} 失败：{exc}；回退到 HTTP 断点续传")

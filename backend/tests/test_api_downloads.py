@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -6,6 +7,22 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from app.main import create_app
+
+
+async def _inflight_run(task, on_progress, on_log, cancelled):
+    # Persist a partial progress value, then stay in-flight until a cooperative
+    # control signal (cancel / pause) raised from on_progress unwinds us.
+    await on_progress(500, 1000, 10)
+    while not cancelled.is_set():
+        await asyncio.sleep(0.02)
+        await on_progress(500, 1000, 10)
+
+
+def _app(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
+    return create_app()
 
 
 def _wait_status(client, tid, headers, *statuses, attempts=50):
@@ -426,3 +443,102 @@ def test_cleanup_completed_tasks(client):
     assert cleaned.json()["deleted"] >= 1
     for tid in ids:
         assert client.get(f"/api/downloads/{tid}", headers=headers).status_code == 404
+
+
+def test_pause_resume_roundtrip_preserves_progress(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        r = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "pa/us", "source": "huggingface", "target": "vllm"},
+        )
+        tid = r.json()["id"]
+        assert _wait_status(client, tid, headers, "running")["status"] == "running"
+        # Ensure the in-flight run has committed progress before pausing, so the
+        # "preserves progress" assertion exercises a real non-zero breakpoint.
+        for _ in range(60):
+            row = client.get(f"/api/downloads/{tid}", headers=headers).json()
+            if row["progress_bytes"] >= 500:
+                break
+            time.sleep(0.05)
+        pr = client.post(f"/api/downloads/{tid}/pause", headers=headers)
+        assert pr.status_code == 200
+        body = pr.json()
+        assert body["status"] == "paused"
+        assert body["progress_bytes"] == 500
+        rr = client.post(f"/api/downloads/{tid}/resume", headers=headers)
+        assert rr.status_code == 200
+        rb = rr.json()
+        assert rb["status"] in ("queued", "running")
+        assert rb["progress_bytes"] == 500
+        client.post(f"/api/downloads/{tid}/cancel", headers=headers)
+
+
+def test_pause_resume_reject_completed(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer secret"}
+
+    async def quick_run(task, on_progress, on_log, cancelled):
+        await on_progress(100, 100, 0)
+
+    with TestClient(app) as client:
+        client.app.state.queue._run_download = quick_run  # type: ignore[method-assign]
+        r = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "iv/x", "source": "huggingface", "target": "vllm"},
+        )
+        tid = r.json()["id"]
+        assert _wait_status(client, tid, headers, "completed")["status"] == "completed"
+        assert client.post(f"/api/downloads/{tid}/pause", headers=headers).status_code == 400
+        assert client.post(f"/api/downloads/{tid}/resume", headers=headers).status_code == 400
+
+
+def test_resume_rejects_running(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        r = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "rn/x", "source": "huggingface", "target": "vllm"},
+        )
+        tid = r.json()["id"]
+        assert _wait_status(client, tid, headers, "running")["status"] == "running"
+        assert client.post(f"/api/downloads/{tid}/resume", headers=headers).status_code == 400
+        client.post(f"/api/downloads/{tid}/cancel", headers=headers)
+
+
+def test_cancel_and_delete_paused_task(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        # Cancel from paused.
+        r1 = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "cp/a", "source": "huggingface", "target": "vllm"},
+        )
+        t1 = r1.json()["id"]
+        _wait_status(client, t1, headers, "running")
+        assert client.post(f"/api/downloads/{t1}/pause", headers=headers).json()["status"] == "paused"
+        cr = client.post(f"/api/downloads/{t1}/cancel", headers=headers)
+        assert cr.status_code == 200
+        assert _wait_status(client, t1, headers, "cancelled")["status"] == "cancelled"
+        # Delete from paused.
+        r2 = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "dp/b", "source": "huggingface", "target": "vllm"},
+        )
+        t2 = r2.json()["id"]
+        _wait_status(client, t2, headers, "running")
+        assert client.post(f"/api/downloads/{t2}/pause", headers=headers).json()["status"] == "paused"
+        dele = client.delete(f"/api/downloads/{t2}", headers=headers)
+        assert dele.status_code == 200
+        assert client.get(f"/api/downloads/{t2}", headers=headers).status_code == 404

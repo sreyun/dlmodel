@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.downloaders.ollama import download_ollama
 from app.downloaders.hf import hf_repo_exists, download_hf
 from app.downloaders.modelscope import ms_repo_exists, download_modelscope
+from app.downloaders.base import DownloadPaused
 
 
 def _hf_404():
@@ -315,6 +316,52 @@ async def test_download_hf_probes_aria2_once_per_task():
             on_log=on_log,
         )
     assert aria2.is_available.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_download_hf_aria2_pause_does_not_fall_back_to_http():
+    # A pause raised from the aria2 progress hook must propagate to the queue, not
+    # be mistaken for an aria2 failure and silently retried over HTTP.
+    aria2 = MagicMock()
+    aria2.is_available = AsyncMock(return_value=True)
+    aria2.add_uri = AsyncMock(return_value="gid-1")
+    aria2.tell_status = AsyncMock(
+        return_value={
+            "status": "downloading",
+            "completed_length": 10,
+            "total_length": 100,
+            "download_speed": 5,
+            "error_message": "",
+        }
+    )
+
+    async def on_progress(d, t, s):
+        raise DownloadPaused()
+
+    async def on_log(m):
+        pass
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/file.bin"),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock) as http_mock,
+        patch("app.downloaders.hf.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(return_value=["file.bin"])
+        with pytest.raises(DownloadPaused):
+            await download_hf(
+                "org/model",
+                Path("/tmp/dest"),
+                endpoint="https://hf.co",
+                token=None,
+                revision="main",
+                aria2=aria2,
+                connections=4,
+                on_progress=on_progress,
+                on_log=on_log,
+            )
+        http_mock.assert_not_awaited()
+        aria2.add_uri.assert_awaited_once()
 
 
 @pytest.mark.asyncio

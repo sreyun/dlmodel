@@ -43,6 +43,13 @@ def is_transient_network_error(exc: BaseException | None) -> bool:
     if exc is None:
         return False
 
+    # Control-flow signals (cancel / pause / aria2 remove) are never transient:
+    # they must propagate immediately instead of being retried or fallen back on.
+    from app.downloaders.base import DownloadControl
+
+    if isinstance(exc, DownloadControl):
+        return False
+
     if isinstance(
         exc,
         (

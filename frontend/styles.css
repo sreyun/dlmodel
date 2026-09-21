@@ -532,6 +532,9 @@ fieldset.choice-set > legend {
 .task-card.status-queued {
   border-left: 3px solid var(--warn);
 }
+.task-card.status-paused {
+  border-left: 3px solid var(--warn);
+}
 
 .task-card:hover {
   border-color: var(--line-strong);
@@ -730,6 +733,7 @@ button:disabled {
 .chip.status-completed { background: var(--ok-soft); color: var(--ok); }
 .chip.status-failed { background: var(--danger-soft); color: var(--danger); }
 .chip.status-cancelled { background: #eef2f5; color: var(--muted); }
+.chip.status-paused { background: var(--warn-soft); color: var(--warn); }
 .chip.ok { background: var(--ok-soft); color: var(--ok); }
 .chip.down { background: var(--danger-soft); color: var(--danger); }
 
@@ -764,6 +768,7 @@ button:disabled {
 
 .progress-fill.done { background: linear-gradient(90deg, #0b7a45, #12b76a); }
 .progress-fill.failed { width: 100%; background: linear-gradient(90deg, #b42318, #f04438); }
+.progress-fill.paused { background: linear-gradient(90deg, #b7791f, #f0b429); }
 .progress-fill.cancelled {
   width: 100%;
   background: linear-gradient(90deg, #94a3b0, #cbd5e1);

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from app.downloaders.base import LogCallback, ProgressCallback
+from app.downloaders.base import DownloadControl, LogCallback, ProgressCallback
 from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
 from app.paths import disk_error_to_message
 
@@ -128,6 +128,9 @@ async def http_download(
         try:
             await _http_download_once(url, dest, on_progress, headers=headers)
             return
+        except DownloadControl:
+            # cancel / pause: propagate immediately, never retried.
+            raise
         except Exception as exc:
             last_exc = exc
             if attempt >= attempts - 1 or not is_transient_network_error(exc):
