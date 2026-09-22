@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-blue)](backend/pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v0.4.2-green)](https://github.com/sreyun/dlmodel/tags)
+[![Release](https://img.shields.io/badge/release-v0.4.3-green)](https://github.com/sreyun/dlmodel/tags)
 [![CI](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml/badge.svg)](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml)
 [![Image](https://img.shields.io/badge/image-Huawei%20SWR-orange)](#deployment--images)
 
@@ -18,7 +18,7 @@
 
 - 🔄 **Automatic multi-source fallback** — the `auto` source probes ModelScope first, then falls back to the HF mirror; within each source it degrades step by step: **aria2 multi-connection → single-stream HTTP resume → native SDK**, connecting to hf-mirror.com / ModelScope directly with no proxy required
 - ⏸️ **Pause / resume / interrupted downloads** — `paused` is a first-class state: a graceful stop of the network stream, not a cancel; the task record, progress, downloaded files, resume checkpoints and logs are kept, and resuming continues from the breakpoint (aria2 `continue` / HTTP `Range` / SDK `.temp` / Ollama server-side cache)
-- 📊 **Download queue** — concurrent tasks (1–8), multi-connection per file, progress / speed / ETA, retry on failure, exponential-backoff retries for transient TLS/network errors
+- 📊 **Download queue** — concurrent tasks (1–8), multi-connection per file, progress / speed / ETA (the total size is derived from each source's metadata; when it cannot be derived the UI says so instead of showing a fake percentage), retry on failure, exponential-backoff retries for transient TLS/network errors
 - 🛡️ **Graceful restart** — on shutdown all `queued` / `running` tasks are parked in SQLite and automatically re-queued on next start; upgrades and restarts never lose tasks
 - 🔑 **Bearer token auth** — constant-time comparison + startup gate (a too-short or weak-password token refuses to boot) + rate limiting on failed auth (429)
 - 🤖 **Inference integration** — one-command Compose profiles for Ollama / vLLM; the UI generates a vLLM launch command from the downloaded model path (path + port, shell-safe quoting); model library scanning and Ollama local model list / pull

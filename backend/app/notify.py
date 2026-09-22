@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.downloaders.progress import format_bytes as _fmt_bytes
+
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
@@ -57,23 +59,6 @@ def validate_webhook_url(channel: str, url: str) -> None:
         raise ValueError(
             f"{channel} Webhook 主机不被允许（期望：{', '.join(sorted(allowed))}）"
         )
-
-
-def _fmt_bytes(n: int | float | None) -> str:
-    if n is None:
-        return "—"
-    try:
-        value = float(n)
-    except (TypeError, ValueError):
-        return "—"
-    if value < 0:
-        value = 0.0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-    while value >= 1024 and i < len(units) - 1:
-        value /= 1024
-        i += 1
-    return f"{value:.1f} {units[i]}" if i else f"{int(value)} {units[i]}"
 
 
 def _fmt_speed(bps: float | int | None) -> str:
@@ -132,11 +117,13 @@ def _progress_line(task: dict) -> str:
         try:
             total_n = int(total)
         except (TypeError, ValueError):
-            return _fmt_bytes(done)
+            return f"已下载 {_fmt_bytes(done)} · 总大小未知"
         if total_n > 0:
             pct = min(100.0, 100.0 * done / total_n)
             return f"{pct:.1f}% · {_fmt_bytes(done)} / {_fmt_bytes(total_n)}"
-    return _fmt_bytes(done)
+    # Same wording as the task card: a bare number next to a moving bar reads as a
+    # broken percentage, not as "the source has not told us the size yet".
+    return f"已下载 {_fmt_bytes(done)} · 总大小未知"
 
 
 def _default_note(event: str, task: dict) -> str:

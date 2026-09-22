@@ -102,6 +102,10 @@ class DownloadQueue:
         self._aria2: Aria2Client | None = None
         self._stopping = False
         self._busy_dests: set[str] = set()
+        # dest_key -> task_id that currently owns the in-flight download, and the
+        # subset of keys whose detached ModelScope thread may still be writing.
+        self._dest_holders: dict[str, str] = {}
+        self._detached_dests: set[str] = set()
         self._notify_tasks: set[asyncio.Task] = set()
         self._started_notified: set[str] = set()
 
@@ -205,6 +209,8 @@ class DownloadQueue:
             self._pause_flags.clear()
             self._task_gids.clear()
             self._busy_dests.clear()
+            self._dest_holders.clear()
+            self._detached_dests.clear()
             self._started_notified.clear()
             if self._notify_tasks:
                 await asyncio.gather(*list(self._notify_tasks), return_exceptions=True)
@@ -228,8 +234,7 @@ class DownloadQueue:
             )
         if payload.target == "vllm":
             dest_path = str(hf_model_dir(settings.model_root, payload.name))
-            if dest_path in self._busy_dests:
-                raise ValueError("目标目录仍有未结束的下载，请稍后再试")
+            await self._ensure_dest_free(dest_path)
             message = "已加入队列，等待调度…"
         else:
             dest_path = ""
@@ -287,12 +292,71 @@ class DownloadQueue:
         """Drop all in-memory bookkeeping for a task that owns no live worker.
 
         Used when a task reaches a terminal state or a durable paused state so the
-        long-lived queue does not leak per-task dicts/sets. Never touches disk.
+        long-lived queue does not leak per-task dicts/sets. Also reclaims the
+        target-dir claim so a downloader that failed before spawning its thread
+        cannot leave a stale ``_busy_dests`` entry that would reject every later
+        resume/retry/create forever. Keys whose detached ModelScope thread may
+        still be writing are deliberately kept until the thread reports done.
+        Never touches disk.
         """
         self._cancel_flags.pop(task_id, None)
         self._pause_flags.pop(task_id, None)
         self._task_gids.pop(task_id, None)
         self._started_notified.discard(task_id)
+        for key, holder in list(self._dest_holders.items()):
+            if holder == task_id and key not in self._detached_dests:
+                self._release_dest(key, task_id)
+
+    def _dest_key(self, dest_path: str) -> str:
+        """Normalise a DB dest_path to the same form _run_download claims."""
+        try:
+            return str(ensure_under_model_root(get_settings().model_root, dest_path))
+        except ValueError:
+            return str(dest_path)
+
+    def _release_dest(self, dest_key: str, task_id: str | None) -> None:
+        self._busy_dests.discard(dest_key)
+        self._detached_dests.discard(dest_key)
+        holder = self._dest_holders.get(dest_key)
+        if holder is not None and (task_id is None or holder == task_id):
+            self._dest_holders.pop(dest_key, None)
+
+    async def _ensure_dest_free(self, dest_path: str, task_id: str | None = None) -> None:
+        """Gate a (re)queued download on the target dir being actually free.
+
+        Only a *live* writer is a real conflict: a detached ModelScope thread
+        still writing, or another task whose row is still queued/running. A dir
+        held by this same task is the brief window right after pause/cancel —
+        its worker releases the claim on its next progress tick (≤ a couple of
+        seconds) — so we wait instead of rejecting. Everything else is an orphan
+        and gets reclaimed here: a claim and its holder are always registered
+        together synchronously, so a key with no holder (or one whose owner has
+        already reached a state that owns no worker) can only be residue, and
+        the error can never turn into a permanent "try again later".
+        """
+        if not dest_path:
+            return
+        key = self._dest_key(dest_path)
+        for _ in range(50):  # up to ~5s covers one aria2/modelscope poll tick
+            if key not in self._busy_dests:
+                return
+            if key in self._detached_dests:
+                break  # ModelScope thread still writing: real double-write risk
+            holder = self._dest_holders.get(key)
+            if holder is None:
+                self._release_dest(key, None)  # orphaned claim: never sticky
+                return
+            if holder == task_id:
+                await asyncio.sleep(0.1)  # our own worker is winding down
+                continue
+            owner = await get_task(holder)
+            if owner is None or owner["status"] not in ("queued", "running"):
+                self._release_dest(key, None)  # dead owner: stale residue
+                return
+            break  # another live task owns the dir: fail fast
+        if key not in self._busy_dests:
+            return
+        raise ValueError("目标目录仍有未结束的下载，请稍后再试")
 
     async def pause(self, task_id: str) -> None:
         row = await get_task(task_id)
@@ -331,8 +395,10 @@ class DownloadQueue:
             raise ValueError(
                 f"无法恢复处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务"
             )
-        if row["target"] == "vllm" and row.get("dest_path") in self._busy_dests:
-            raise ValueError("目标目录仍有未结束的下载，请稍后再试")
+        # Only a detached ModelScope thread (or another live task) blocks a
+        # resume; the just-paused worker's own claim is awaited out here instead
+        # of surfacing as a misleading 409.
+        await self._ensure_dest_free(row.get("dest_path") or "", task_id)
         # CAS paused -> queued; progress_bytes is preserved so downloaders resume
         # in place (aria2 continue / HTTP Range / SDK temp dirs).
         changed = await update_task_if_in(
@@ -360,8 +426,7 @@ class DownloadQueue:
         if row["target"] == "ollama":
             settings = get_settings()
             message = f"Ollama 拉取；模型保存在 {ollama_root(settings.model_root)}"
-        if row["target"] == "vllm" and row.get("dest_path") in self._busy_dests:
-            raise ValueError("目标目录仍有未结束的下载，请稍后再试")
+        await self._ensure_dest_free(row.get("dest_path") or "", task_id)
         claimed = await claim_task_for_retry(
             task_id,
             status="queued",
@@ -496,7 +561,18 @@ class DownloadQueue:
             )
             return
 
-        progress_state = {"ts": 0.0, "bytes": -1}
+        # Progress bookkeeping is monotonic on purpose. Every transport learns the
+        # denominator at a different moment (aria2 only knows total_length after its
+        # HEAD, ModelScope after a repo listing, HF per file), so a single poll can
+        # legitimately come back with less information than the last one. Feeding the
+        # stored values back as the floor is what stops a 150 GB/200 GB bar from
+        # blinking back to "unknown" or restarting at zero after a resume.
+        progress_state = {
+            "ts": 0.0,
+            "bytes": -1,
+            "done": max(0, int(row.get("progress_bytes") or 0)),
+            "total": max(0, int(row.get("total_bytes") or 0)),
+        }
 
         async def on_progress(
             progress_bytes: int,
@@ -509,19 +585,37 @@ class DownloadQueue:
             if paused.is_set():
                 await self._remove_aria2_gids(task_id)
                 raise DownloadPaused()
+            now = time.monotonic()
+            done = max(int(progress_bytes or 0), progress_state["done"])
+            incoming = int(total_bytes or 0)
+            if incoming:
+                # A fresh denominator is trusted (sources refine their estimate as
+                # files land) but never below the bytes already moved, which would
+                # publish a >100 % ratio.
+                total = max(incoming, done)
+            else:
+                # "No total in this poll" must never erase a total we already
+                # learned — that erase was the single biggest source of the bar
+                # losing its percentage mid-download.
+                total = progress_state["total"]
+            total_changed = total != progress_state["total"]
+            progress_state["done"] = done
+            progress_state["total"] = total
+            progress_bytes, total_bytes = done, (total or None)
+            finished = total_bytes is not None and done >= int(total_bytes) > 0
             # Persist/publish at most every ~0.5s or per 1 MB moved, but always the
             # first update and the final/complete ones so a finished row is exact.
             # HTTP fallback fires per network chunk; without this it would commit to
-            # SQLite (plus a publish read) thousands of times per large file.
-            now = time.monotonic()
-            done = int(progress_bytes or 0)
-            finished = total_bytes is not None and done >= int(total_bytes) > 0
+            # SQLite (plus a publish read) thousands of times per large file. A
+            # changed total is published immediately so the bar gains (or corrects)
+            # its percentage the moment the source reveals it, not up to 0.5 s later.
             due = (
                 progress_state["ts"] == 0.0
                 or (now - progress_state["ts"]) >= 0.5
                 or (done - progress_state["bytes"]) >= (1024 * 1024)
                 or speed_bps in (0, 0.0)
                 or finished
+                or total_changed
             )
             if due:
                 progress_state["ts"] = now
@@ -605,8 +699,17 @@ class DownloadQueue:
                 task_id, status="cancelled", message=self._cancel_message()
             )
             return
+        # Close the row on the numbers we actually moved: a source whose listing
+        # under-counted would otherwise stay forever at "98 %" after completing.
+        final_done = progress_state["done"]
+        final_total = max(progress_state["total"], final_done)
         await self._finish_if_active(
-            task_id, status="completed", speed_bps=0, message="下载已完成"
+            task_id,
+            status="completed",
+            speed_bps=0,
+            message="下载已完成",
+            progress_bytes=final_done,
+            total_bytes=final_total or None,
         )
 
     async def _run_download(self, task, on_progress, on_log, cancelled) -> None:
@@ -668,6 +771,7 @@ class DownloadQueue:
                     if dest_key in self._busy_dests:
                         raise RuntimeError("目标目录仍有未结束的下载，请稍后再试")
                     self._busy_dests.add(dest_key)
+                    self._dest_holders[dest_key] = task["id"]
                     try:
                         aria2 = self._aria2_for_task(task["id"])
                         await download_hf(
@@ -682,7 +786,7 @@ class DownloadQueue:
                             on_log=on_log,
                         )
                     finally:
-                        self._busy_dests.discard(dest_key)
+                        self._release_dest(dest_key, task["id"])
                     return
                 if source == "modelscope":
                     if not await ms_exists(task["name"]):
@@ -695,6 +799,22 @@ class DownloadQueue:
                     if dest_key in self._busy_dests:
                         raise RuntimeError("目标目录仍有未结束的下载，请稍后再试")
                     self._busy_dests.add(dest_key)
+                    self._dest_holders[dest_key] = task["id"]
+
+                    def _ms_release(
+                        still_writing: bool,
+                        key=dest_key,
+                        tid=task["id"],
+                    ) -> None:
+                        # True: the detached snapshot_download thread is still
+                        # writing — keep the claim (and mark it as a real risk
+                        # for resume/retry). False: no thread (or it finished):
+                        # release immediately.
+                        if still_writing:
+                            self._detached_dests.add(key)
+                        else:
+                            self._release_dest(key, tid)
+
                     try:
                         await download_modelscope(
                             task["name"],
@@ -703,13 +823,15 @@ class DownloadQueue:
                             revision=task.get("revision"),
                             on_progress=on_progress,
                             on_log=on_log,
-                            on_detached=lambda key=dest_key: self._busy_dests.discard(key),
+                            on_detached=_ms_release,
                         )
                     except BaseException:
-                        # on_detached releases when the background thread finishes.
+                        # download_modelscope guarantees on_detached fired (or
+                        # pending from the detach task) on every propagating
+                        # exit; _release_task remains the final backstop.
                         raise
                     else:
-                        self._busy_dests.discard(dest_key)
+                        self._release_dest(dest_key, task["id"])
                     return
                 if source == "ollama":
                     found_any = True
@@ -797,7 +919,12 @@ class DownloadQueue:
             logger.exception("notify failed id=%s event=%s", task_id[:8], event)
 
     async def _finish_if_active(self, task_id: str, *, status: str, **fields) -> None:
-        changed = await update_active_task(task_id, status=status, **fields)
+        # Only a row this worker actually owns ("running") may be transitioned here.
+        # cancel / pause / retry write their own state, so a no-op means somebody
+        # else already moved the row — and a worker that is merely winding down must
+        # never re-cancel a row that a retry has just requeued (which used to
+        # silently swallow the retry: the task looked stuck on "已取消").
+        changed = await update_task_if_in(task_id, ("running",), status=status, **fields)
         if status in _TERMINAL or status == "paused":
             # Worker is done with this task; drop in-memory bookkeeping so these
             # dicts do not grow with every task the long-lived queue serves.

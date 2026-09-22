@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-blue)](backend/pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v0.4.2-green)](https://github.com/sreyun/dlmodel/tags)
+[![Release](https://img.shields.io/badge/release-v0.4.3-green)](https://github.com/sreyun/dlmodel/tags)
 [![CI](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml/badge.svg)](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml)
 [![Image](https://img.shields.io/badge/image-Huawei%20SWR-orange)](#デプロイとイメージ)
 
@@ -16,7 +16,7 @@
 
 - 🔄 **マルチソース自動フォールバック** — `auto` ソースは ModelScope を先に試し、HF ミラーへフォールバック。各ソース内では **aria2 並列 → 単一ストリーム HTTP 続き取り → ネイティブ SDK** の順に段階的に降格し、プロキシなしで hf-mirror.com / ModelScope に直接接続できます
 - ⏸️ **一時停止 / 再開 / 続き取り** — `paused` は第一級の状態です。取消ではなくネットワークストリームの安全な停止であり、タスク記録・進捗・ダウンロード済みファイル・ブレークポイント・ログを保持。再開すれば続きから取得します（aria2 `continue` / HTTP `Range` / SDK `.temp` / Ollama サーバー側キャッシュ）
-- 📊 **ダウンロードキュー** — 複数タスク同時実行（1–8）、1 ファイル複数接続、進捗 / 速度 / ETA、失敗時のリトライ、一時的な TLS/ネットワークエラーに対する指数バックオフ・リトライ
+- 📊 **ダウンロードキュー** — 複数タスク同時実行（1–8）、1 ファイル複数接続、進捗 / 速度 / ETA（合計サイズは各ソースのメタデータから算出し、算出できない場合は偽のパーセンテージではなく「不明」と明示）、失敗時のリトライ、一時的な TLS/ネットワークエラーに対する指数バックオフ・リトライ
 - 🛡️ **グレースフル再起動** — 停止時に `queued` / `running` タスクを SQLite に退避し、次回起動時に自動で再キュー・続き取り。アップグレードや再起動でタスクを失いません
 - 🔑 **Bearer トークン認証** — 定数時間比較 + 起動ゲート（短すぎる / 弱いパスワードのトークンは起動を拒否）+ 認証失敗のレート制限（429）
 - 🤖 **推論サービス統合** — Compose プロファイルで Ollama / vLLM をワンコマースタート。UI はダウンロード済みモデルパスから vLLM 起動コマンドを生成（パス + ポート、シェル安全なクォート）。モデルライブラリスキャン、Ollama ローカルモデル一覧 / プルに対応

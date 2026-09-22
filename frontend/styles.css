@@ -753,6 +753,12 @@ button:disabled {
   overflow: hidden;
 }
 
+.progress-remain {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .progress-fill {
   height: 100%;
   width: 0%;

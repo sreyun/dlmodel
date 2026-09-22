@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-blue)](backend/pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v0.4.2-green)](https://github.com/sreyun/dlmodel/tags)
+[![Release](https://img.shields.io/badge/release-v0.4.3-green)](https://github.com/sreyun/dlmodel/tags)
 [![CI](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml/badge.svg)](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml)
 [![Image](https://img.shields.io/badge/image-Huawei%20SWR-orange)](#部署与镜像)
 
@@ -18,7 +18,7 @@
 
 - 🔄 **多源自动回退** — `auto` 源先探测 ModelScope、再回落 HF 镜像；每个源内部按 **aria2 多连接 → 单流 HTTP 断点续传 → 原生 SDK** 逐级降级，无需代理即可直连 hf-mirror.com / 魔搭
 - ⏸️ **暂停 / 恢复 / 断点续传** — `paused` 是一等状态：安全停止网络流而非取消，保留任务、进度、已下载文件、断点与日志，恢复后续传（aria2 `continue` / HTTP `Range` / SDK `.temp` / Ollama 服务端缓存）
-- 📊 **下载队列** — 多任务并发（1–8）、单文件多连接、进度 / 速率 / ETA、失败重试、瞬时 TLS / 网络错误指数退避重试
+- 📊 **下载队列** — 多任务并发（1–8）、单文件多连接、进度 / 速率 / ETA（总大小由各源元数据自动测算，测不出时明确标注「总大小未知」而不是给一个假百分比）、失败重试、瞬时 TLS / 网络错误指数退避重试
 - 🛡️ **优雅重启** — 停机时 `queued` / `running` 任务统一停放落库，下次启动自动重新排队并续传，升级 / 重启不丢任务
 - 🔑 **Bearer Token 鉴权** — 常量时间比较 + 启动门禁（过短 / 弱口令 Token 直接拒绝启动）+ 认证失败限速（频繁错误尝试返回 429）
 - 🤖 **推理服务集成** — Compose profile 一键拉起 Ollama / vLLM；UI 内基于已下载模型路径生成 vLLM 启动命令（模型路径 + 端口，shell 安全引用），支持模型库扫描与 Ollama 本地模型列表 / 拉取

@@ -194,13 +194,16 @@ function progressPct(task) {
 
 function progressLabel(task) {
   const pct = progressPct(task);
+  const done = fmtBytes(task.progress_bytes);
   if (pct == null) {
-    if (task.status === "running" || task.status === "queued") {
-      return `已下载 ${fmtBytes(task.progress_bytes)}`;
-    }
-    return fmtBytes(task.progress_bytes);
+    // No denominator: name the missing piece instead of showing a lone number next
+    // to a sweeping bar, which reads as "the bar knows but is hiding it".
+    if (task.status === "queued") return "排队中 · 总大小待测算";
+    if (task.status === "running") return `已下载 ${done} · 总大小测算中…`;
+    if (task.status === "paused") return `已下载 ${done} · 总大小未知`;
+    return done;
   }
-  return `${pct.toFixed(1)}% · ${fmtBytes(task.progress_bytes)} / ${fmtBytes(task.total_bytes)}`;
+  return `${pct.toFixed(1)}% · ${done} / ${fmtBytes(task.total_bytes)}`;
 }
 
 function friendlyMessage(message, status) {
@@ -645,19 +648,35 @@ function taskCard(task) {
     task.status === "failed" ? "failed" : "",
     task.status === "cancelled" ? "cancelled" : "",
     task.status === "paused" ? "paused" : "",
-    (task.status === "running" || task.status === "queued") && pct == null
-      ? "indeterminate"
-      : "",
+    // Only a live transfer is allowed to sweep: a queued row has moved no bytes, and
+    // animated motion there is the same class of lie as a fake bar width.
+    task.status === "running" && pct == null ? "indeterminate" : "",
   ]
     .filter(Boolean)
     .join(" ");
-  let width = 0;
-  if (task.status === "cancelled") width = 100;
-  else if (pct == null) width = task.status === "failed" || task.status === "completed" ? 100 : 35;
-  else width = pct;
+  // Width of the filled bar. A task whose total is still unknown gets no inline
+  // width at all: the hardcoded 35 % used here rendered as a bar permanently stuck
+  // "just under half" (worst on paused/failed rows, which have no sweep animation
+  // to suggest motion), which is exactly what made a 150 GB/200 GB download look
+  // like it had barely started. Indeterminate rows rely on the CSS sweep; anything
+  // else reports 0 until a real percentage exists.
+  let fillStyle;
+  if (task.status === "cancelled") fillStyle = "width:100%";
+  else if (pct != null) fillStyle = `width:${pct > 0 ? Math.max(pct, 1) : 0}%`;
+  else if (task.status === "failed" || task.status === "completed") fillStyle = "width:100%";
+  else if (task.status === "running") fillStyle = ""; // CSS sweep, bytes are moving
+  else fillStyle = "width:0%";
   const rightMeta = showSpeed
     ? `${esc(fmtSpeed(task.speed_bps))}${eta ? ` · ETA ${eta}` : ""}`
     : "";
+  // "还剩多少" is the number that actually matters on a 200 GB pull, and it is the
+  // quickest way to tell a real percentage from a stale one.
+  const remainText =
+    pct != null && (task.status === "running" || task.status === "queued")
+      ? `剩余 ${fmtBytes(
+          Math.max(Number(task.total_bytes) - Number(task.progress_bytes || 0), 0),
+        )}`
+      : "";
   const showMsg =
     msg &&
     (task.status === "running" ||
@@ -689,8 +708,9 @@ function taskCard(task) {
     <div class="progress-block">
       <div class="progress-row">
         <span>${esc(progressLabel(task))}</span>
+        ${remainText ? `<span class="progress-remain">${esc(remainText)}</span>` : ""}
       </div>
-      <div class="progress-track"><div class="${fillClass}" style="width:${width}%"></div></div>
+      <div class="progress-track"><div class="${fillClass}" style="${fillStyle}"></div></div>
     </div>
     ${showMsg ? `<div class="task-message ${task.status === "failed" ? "error" : ""}">${esc(msg)}</div>` : ""}
   </article>`;

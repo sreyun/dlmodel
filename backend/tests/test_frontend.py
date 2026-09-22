@@ -62,6 +62,15 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         assert "task-list" in js.text
         assert "progress-fill" in js.text
         assert "taskCard" in js.text
+        # 进度的真实度：分母未知时要说清楚，并不得再回退到写死的假宽度
+        assert "总大小测算中" in js.text
+        assert "总大小未知" in js.text
+        assert "总大小待测算" in js.text
+        assert "progress-remain" in js.text
+        assert "? 100 : 35" not in js.text
+        assert "width:35%" not in js.text
+        # 只有真在传输的任务才允许扫光动画（排队的行没有动过字节）
+        assert 'task.status === "running" && pct == null' in js.text
         assert "pairWarning" in js.text
         assert 'data-act="delete"' in js.text or "data-act=\"delete\"" in js.text
         assert 'data-act="pause"' in js.text
@@ -74,6 +83,7 @@ def test_spa_assets_use_token_and_task_poll(monkeypatch, tmp_path):
         css = client.get("/styles.css")
         assert css.status_code == 200
         assert "progress-track" in css.text
+        assert "progress-remain" in css.text
         assert "focus-visible" in css.text
         assert css.text.strip()
 

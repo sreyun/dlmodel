@@ -542,3 +542,58 @@ def test_cancel_and_delete_paused_task(tmp_path, monkeypatch):
         dele = client.delete(f"/api/downloads/{t2}", headers=headers)
         assert dele.status_code == 200
         assert client.get(f"/api/downloads/{t2}", headers=headers).status_code == 404
+
+
+def test_orphan_dest_claim_reclaimed_not_sticky_409(tmp_path, monkeypatch):
+    """回归：残留的目标目录占位不得让 retry / 同名新建 / resume 长期被拒。"""
+    app = _app(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer secret"}
+
+    async def failing_run(task, on_progress, on_log, cancelled):
+        await on_progress(10, 100, 1)
+        raise RuntimeError("boom")
+
+    with TestClient(app) as client:
+        q = client.app.state.queue
+        client.app.state.queue._run_download = failing_run  # type: ignore[method-assign]
+        body = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "or/phan", "source": "huggingface", "target": "vllm"},
+        ).json()
+        tid = body["id"]
+        row = client.get(f"/api/downloads/{tid}", headers=headers).json()
+        key = q._dest_key(row["dest_path"])
+        assert _wait_status(client, tid, headers, "failed")["status"] == "failed"
+
+        # 终态后重试：旧版会因泄漏的无主占位一直 409。
+        q._busy_dests.add(key)
+        rr = client.post(f"/api/downloads/{tid}/retry", headers=headers)
+        assert rr.status_code == 200, rr.text
+        assert key not in q._busy_dests  # 本次放行时已顺手回收
+
+        # 终态后同名新建：同样不得被残留占位拦住。
+        assert _wait_status(client, tid, headers, "failed")["status"] == "failed"
+        q._busy_dests.add(key)
+        rc = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "or/phan", "source": "huggingface", "target": "vllm"},
+        )
+        assert rc.status_code == 200, rc.text
+
+        # 暂停后恢复：无主占位立即回收，不会变成 409。
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        t2 = client.post(
+            "/api/downloads",
+            headers=headers,
+            json={"name": "pa/th", "source": "huggingface", "target": "vllm"},
+        ).json()["id"]
+        assert _wait_status(client, t2, headers, "running")["status"] == "running"
+        assert client.post(f"/api/downloads/{t2}/pause", headers=headers).status_code == 200
+        row2 = client.get(f"/api/downloads/{t2}", headers=headers).json()
+        key2 = q._dest_key(row2["dest_path"])
+        q._busy_dests.add(key2)
+        resume = client.post(f"/api/downloads/{t2}/resume", headers=headers)
+        assert resume.status_code == 200, resume.text
+        client.post(f"/api/downloads/{t2}/cancel", headers=headers)
