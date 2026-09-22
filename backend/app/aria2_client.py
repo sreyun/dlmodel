@@ -73,6 +73,7 @@ class Aria2Client:
         *,
         headers: list[str] | None = None,
         max_tries: int = 5,
+        file_allocation: str = "none",
     ) -> str:
         # Cap per-server connections — too many TLS streams amplify mirror EOF.
         per_server = max(1, min(int(connections), 8))
@@ -86,6 +87,13 @@ class Aria2Client:
             "retry-wait": "3",
             "connect-timeout": "30",
             "timeout": "120",
+            # aria2-pro ships ``file-allocation=falloc``, which Docker Desktop's
+            # Windows-backed mounts (and most network filesystems) reject outright:
+            # every >64MB file died with "fallocate failed. Operation not supported"
+            # and the whole download silently degraded to single-stream HTTP.
+            # Per-URI options win over the daemon config, and ``none`` is aria2's own
+            # default, so no host filesystem can be worse off than upstream.
+            "file-allocation": file_allocation,
         }
         if headers:
             options["header"] = list(headers)

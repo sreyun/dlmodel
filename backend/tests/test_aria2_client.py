@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import respx
 from httpx import Response
@@ -28,6 +30,26 @@ async def test_add_uri_and_status():
     assert b"max-tries" in add_body
     assert b"continue" in add_body
     assert b"token:token" in add_body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_uri_overrides_host_file_allocation():
+    """The aria2-pro image sets falloc, which network/Windows mounts reject."""
+    route = respx.post("http://aria2.test/jsonrpc").mock(
+        return_value=Response(200, json={"id": "1", "jsonrpc": "2.0", "result": "g"})
+    )
+    client = Aria2Client("http://aria2.test/jsonrpc", secret="token")
+    await client.add_uri(["https://example.com/big.safetensors"], "/models", "big", 16)
+    options = json.loads(route.calls.last.request.content)["params"][2]
+    assert options["file-allocation"] == "none"
+
+    await client.add_uri(
+        ["https://example.com/big.safetensors"], "/models", "big", 16,
+        file_allocation="falloc",
+    )
+    options = json.loads(route.calls.last.request.content)["params"][2]
+    assert options["file-allocation"] == "falloc"
 
 
 @pytest.mark.asyncio
