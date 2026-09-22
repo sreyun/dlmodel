@@ -9,9 +9,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Dependency layer: keyed on pyproject.toml alone. Installing the project from a
+# metadata-only stub first means a code-only release no longer invalidates the whole
+# site-packages layer, which used to force a full pip install plus a cross-border
+# re-upload of every dependency on each tag push (the reason releases hung for tens
+# of minutes when the registry path was slow).
 COPY backend/pyproject.toml /app/pyproject.toml
-COPY backend/app /app/app
+COPY backend/app/__init__.py /app/app/__init__.py
 RUN pip install --no-cache-dir .
+
+# Application layer: the real code replaces the stub above (--no-deps keeps this
+# local, so nothing is re-resolved or downloaded here).
+COPY backend/app /app/app
+RUN pip install --no-cache-dir --no-deps --force-reinstall .
 
 COPY frontend /frontend
 

@@ -22,6 +22,12 @@ env:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    # Fail loudly instead of hanging: a stalled SWR round trip once left the job
+    # running for three quarters of an hour with no signal, which reads as "the
+    # release is coming" to everyone but the person watching the registry. The push
+    # step below carries its own per-attempt deadline, so this only has to bound the
+    # whole job.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,20 +76,71 @@ jobs:
           fi
           # Huawei SWR long-term login password = HMAC-SHA256(SK, AK) as hex
           LOGIN_PASS="$(printf '%s' "$HW_ACCESS_KEY" | openssl dgst -binary -sha256 -hmac "$HW_SECRET_KEY" | xxd -p -c 256)"
-          echo "$LOGIN_PASS" | docker login -u "${SWR_REGION}@${HW_ACCESS_KEY}" --password-stdin "$SWR_REGISTRY"
+          # The registry occasionally answers nothing at all ("Client.Timeout exceeded
+          # while awaiting headers"); one blip must not cost a release.
+          for attempt in 1 2 3; do
+            if printf '%s' "$LOGIN_PASS" | timeout 90 docker login -u "${SWR_REGION}@${HW_ACCESS_KEY}" --password-stdin "$SWR_REGISTRY"; then
+              exit 0
+            fi
+            echo "SWR login failed (attempt $attempt/3); retrying…" >&2
+            sleep 10
+          done
+          echo "SWR login failed after 3 attempts." >&2
+          exit 1
 
-      - name: Build and push
+      # Build and push are separate on purpose. `buildx --push` uploads while it
+      # exports, so one stalled connection burns the entire build again; exporting to
+      # the daemon first lets a plain `docker push` retry skip every layer the
+      # registry already has.
+      - name: Build image
         uses: docker/build-push-action@v6
+        timeout-minutes: 15
         with:
           context: .
           file: backend/Dockerfile
-          push: true
+          push: false
+          load: true
           tags: |
             ${{ steps.meta.outputs.image_tag }}
             ${{ steps.meta.outputs.image_latest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      - name: Push to Huawei SWR
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          push_one() {
+            local image="$1" attempt
+            for attempt in 1 2 3 4 5; do
+              echo "Pushing ${image} (attempt ${attempt}/5)…"
+              # `timeout` guards a half-open connection that would otherwise sit there
+              # until the runner is reclaimed; docker push resumes past any layer the
+              # registry already accepted, so a retry is cheap.
+              if timeout 420 docker push "${image}"; then
+                return 0
+              fi
+              echo "push failed (attempt ${attempt}/5), backing off…" >&2
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+          # Pinned tag first: it is the release artefact. `latest` shares every blob
+          # with it, so that push is a manifest-only round trip.
+          push_one "${{ steps.meta.outputs.image_tag }}"
+          push_one "${{ steps.meta.outputs.image_latest }}"
+
+      - name: Verify the pushed manifest
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Ask the registry, not the local daemon: the release is only real once the
+          # manifest answers there.
+          docker buildx imagetools inspect "${{ steps.meta.outputs.image_tag }}"
+          docker buildx imagetools inspect "${{ steps.meta.outputs.image_latest }}" >/dev/null
 
       - name: Summary
         run: |
