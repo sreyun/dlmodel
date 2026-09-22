@@ -13,6 +13,9 @@ on:
 
 permissions:
   contents: read
+  # Needed by the auto-requeue step: a stalled cross-border push is retried on a
+  # fresh runner (through the API) instead of by a human clicking Retry.
+  actions: write
 
 env:
   SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
@@ -110,27 +113,55 @@ jobs:
       - name: Push to Huawei SWR
         shell: bash
         timeout-minutes: 25
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          PINNED: ${{ steps.meta.outputs.image_tag }}
+          LATEST: ${{ steps.meta.outputs.image_latest }}
         run: |
           set -euo pipefail
-          push_one() {
-            local image="$1" attempt
-            for attempt in 1 2 3 4 5; do
-              echo "Pushing ${image} (attempt ${attempt}/5)…"
+          push_pinned() {
+            local attempt
+            for attempt in 1 2 3; do
+              echo "Pushing ${PINNED} (attempt ${attempt}/3)…"
               # `timeout` guards a half-open connection that would otherwise sit there
               # until the runner is reclaimed; docker push resumes past any layer the
               # registry already accepted, so a retry is cheap.
-              if timeout 420 docker push "${image}"; then
+              if timeout 420 docker push "${PINNED}" 2>&1 | tee /tmp/push.log; then
                 return 0
               fi
-              echo "push failed (attempt ${attempt}/5), backing off…" >&2
-              sleep $((attempt * 15))
+              # Say which blobs are still unresolved: a stalled push always dies in the
+              # same shape (most layers answered, a couple never come back), and this
+              # line is what makes the failure diagnosable from the log alone.
+              echo "push failed (attempt ${attempt}/3); layers still queued:" >&2
+              grep -E ": (Preparing|Waiting)$" /tmp/push.log | sort -u >&2 || true
+              sleep $((attempt * 20))
             done
             return 1
           }
-          # Pinned tag first: it is the release artefact. `latest` shares every blob
-          # with it, so that push is a manifest-only round trip.
-          push_one "${{ steps.meta.outputs.image_tag }}"
-          push_one "${{ steps.meta.outputs.image_latest }}"
+          push_pinned
+          # `latest` shares every blob with the pinned tag, so re-pushing it costs a
+          # second cross-border round trip for zero new data — that is exactly the
+          # request pattern that stalls here. Point it at the manifest that is already
+          # published instead: a registry-side copy, no upload.
+          if [ "${TAG}" = "latest" ]; then
+            echo "Pinned tag is already 'latest'; skipping the second push."
+          else
+            docker buildx imagetools create -t "${LATEST}" "${PINNED}"
+          fi
+
+      # The SWR path fails per runner, not per attempt: within one job every retry
+      # reuses the same egress and hangs on the same blob, which is why five in-step
+      # attempts burned 25 minutes and achieved nothing. v0.4.3 only shipped because a
+      # human re-ran the job and landed on a different machine, so do that for them.
+      - name: Requeue the release on a fresh runner
+        if: failure() && github.run_attempt < 3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Release job failed here; re-queuing it on a fresh runner (attempt ${{ github.run_attempt }} → next)." >&2
+          gh api -X POST \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/rerun-failed-jobs"
 
       - name: Verify the pushed manifest
         shell: bash
