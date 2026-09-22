@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.11-blue)](backend/pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v0.4.4-green)](https://github.com/sreyun/dlmodel/tags)
+[![Release](https://img.shields.io/badge/release-v0.4.5-green)](https://github.com/sreyun/dlmodel/tags)
 [![CI](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml/badge.svg)](https://github.com/sreyun/dlmodel/actions/workflows/docker-swr.yml)
 [![Image](https://img.shields.io/badge/image-Huawei%20SWR-orange)](#deployment--images)
 
