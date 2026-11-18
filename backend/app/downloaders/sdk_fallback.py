@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 
+from app.aria2_client import aria2_control_path
 from app.downloaders.base import DownloadControl, LogCallback, ProgressCallback
 from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
 from app.paths import disk_error_to_message
@@ -25,13 +26,21 @@ def _disk_error(exc: OSError, dest: Path) -> BaseException:
     return RuntimeError(message) if message else exc
 
 
+def _range_total(resp: httpx.Response) -> int | None:
+    """Full length from a ``Content-Range: bytes */N`` (or ``a-b/N``) header."""
+    content_range = resp.headers.get("content-range") or ""
+    if "/" not in content_range:
+        return None
+    try:
+        return int(content_range.rsplit("/", 1)[-1])
+    except ValueError:
+        return None
+
+
 def _parse_total(resp: httpx.Response, *, existing: int, resumed: bool) -> int | None:
-    content_range = resp.headers.get("content-range")
-    if content_range and "/" in content_range:
-        try:
-            return int(content_range.rsplit("/", 1)[-1])
-        except ValueError:
-            pass
+    range_total = _range_total(resp)
+    if range_total is not None:
+        return range_total
     content_length = resp.headers.get("content-length")
     if not content_length:
         return None
@@ -40,6 +49,26 @@ def _parse_total(resp: httpx.Response, *, existing: int, resumed: bool) -> int |
     except ValueError:
         return None
     return existing + length if resumed else length
+
+
+class _LocalFileMismatch(Exception):
+    """The local file is not a prefix of the remote one (longer than it)."""
+
+
+def discard_aria2_partial(dest: Path) -> bool:
+    """Drop a file aria2 left unfinished; True when something was discarded.
+
+    Range resume appends at the current length, which is only right for a file
+    written front to back. An aria2 partial has holes in the middle, so resuming
+    it here would keep the holes and still end at the expected size. Starting the
+    file over is the only correct continuation without aria2.
+    """
+    control = aria2_control_path(dest)
+    if not control.exists():
+        return False
+    dest.unlink(missing_ok=True)
+    control.unlink(missing_ok=True)
+    return True
 
 
 async def _http_download_once(
@@ -63,6 +92,9 @@ async def _http_download_once(
     ) as client:
         async with client.stream("GET", url, headers=req_headers) as resp:
             if resp.status_code == 416 and existing > 0:
+                remote_total = _range_total(resp)
+                if remote_total is not None and remote_total != existing:
+                    raise _LocalFileMismatch()
                 await on_progress(existing, existing, 0.0)
                 return
 
@@ -122,17 +154,28 @@ async def http_download(
     on_log: LogCallback | None = None,
 ) -> None:
     """Download with Range resume; retry transient TLS/network failures."""
+    if discard_aria2_partial(dest) and on_log is not None:
+        await on_log(f"{dest.name} 是 aria2 未完成的分片文件，HTTP 无法接续，改为从头下载")
     attempts = max(1, int(retries) + 1)
-    last_exc: BaseException | None = None
-    for attempt in range(attempts):
+    attempt = 0
+    restarted = False
+    while True:
         try:
             await _http_download_once(url, dest, on_progress, headers=headers)
             return
         except DownloadControl:
             # cancel / pause: propagate immediately, never retried.
             raise
+        except _LocalFileMismatch:
+            if restarted:
+                raise RuntimeError(f"{dest.name} 与远端文件长度不一致") from None
+            # Left over from another revision: not resumable, and not a network
+            # failure either, so it does not use up a retry.
+            restarted = True
+            dest.unlink(missing_ok=True)
+            if on_log is not None:
+                await on_log(f"{dest.name} 比远端文件长，改为从头下载")
         except Exception as exc:
-            last_exc = exc
             if attempt >= attempts - 1 or not is_transient_network_error(exc):
                 raise
             delay = retry_backoff_seconds(attempt)
@@ -146,5 +189,4 @@ async def http_download(
             if on_log is not None:
                 await on_log(msg)
             await asyncio.sleep(delay)
-    if last_exc is not None:
-        raise last_exc
+            attempt += 1

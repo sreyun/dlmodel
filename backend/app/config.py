@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     download_concurrency: int = 2
     aria2_connections: int = 16
     download_retries: int = 3
+    verify_downloads: bool = True
     ollama_base_url: str = "http://ollama:11434"
     vllm_base_url: str = "http://vllm:8000"
     vllm_model: str | None = None
