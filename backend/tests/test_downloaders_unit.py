@@ -1219,3 +1219,42 @@ async def test_aria2_rpc_failure_removes_gid_before_http_fallback(tmp_path):
             "https://hf.co/f", tmp_path / "f.bin", aria2, 4, on_progress
         )
     aria2.force_remove.assert_awaited_once_with("gid-1")
+
+
+@pytest.mark.asyncio
+async def test_ollama_pull_observes_pause_while_server_is_silent(monkeypatch):
+    """Ollama 长时间不出声时（校验摘要 / 上游卡住），暂停和取消仍要生效。"""
+    import asyncio
+
+    import respx
+
+    import app.downloaders.ollama as ollama_mod
+
+    monkeypatch.setattr(ollama_mod, "_HEARTBEAT_SEC", 0.02)
+
+    class SilentAfterFirstLine(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"status":"pulling","digest":"sha256:a","total":1000,"completed":100}\n'
+            await asyncio.sleep(3600)
+
+    paused = False
+
+    async def on_progress(d, t, s):
+        if paused:
+            raise DownloadPaused()
+
+    async def on_log(m):
+        pass
+
+    with respx.mock:
+        respx.post("http://ollama:11434/api/pull").mock(
+            return_value=httpx.Response(200, stream=SilentAfterFirstLine())
+        )
+        job = asyncio.ensure_future(
+            download_ollama("llama3.2", "http://ollama:11434", on_progress, on_log)
+        )
+        await asyncio.sleep(0.1)
+        assert not job.done()
+        paused = True
+        with pytest.raises(DownloadPaused):
+            await asyncio.wait_for(job, timeout=2)

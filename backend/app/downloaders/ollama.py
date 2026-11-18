@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -19,6 +20,35 @@ def _layer_key(data: dict) -> str:
         if isinstance(value, str) and value:
             return value
     return data.get("status") or "_"
+
+
+# Ollama can go quiet for minutes (digest verification, a stalled upstream). The
+# progress hook is where pause / cancel are observed, so it is ticked on a timer
+# while no line arrives instead of only when the server speaks.
+_HEARTBEAT_SEC = 2.0
+
+
+async def _lines_with_heartbeat(resp: httpx.Response, heartbeat):
+    lines = resp.aiter_lines().__aiter__()
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(lines.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=_HEARTBEAT_SEC)
+            if not done:
+                await heartbeat()
+                continue
+            try:
+                line = pending.result()
+            except StopAsyncIteration:
+                return
+            finally:
+                pending = None
+            yield line
+    finally:
+        if pending is not None:
+            pending.cancel()
 
 
 async def download_ollama(
@@ -52,7 +82,7 @@ async def download_ollama(
             "POST", url, json={"name": name}, timeout=None
         ) as resp:
             resp.raise_for_status()
-            async for line in resp.aiter_lines():
+            async for line in _lines_with_heartbeat(resp, report):
                 if not line:
                     continue
                 try:

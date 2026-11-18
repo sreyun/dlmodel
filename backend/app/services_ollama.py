@@ -1,7 +1,5 @@
 import httpx
 
-from app.downloaders.ollama import download_ollama
-
 
 def _friendly_http_error(exc: Exception) -> str:
     if isinstance(exc, httpx.ConnectError):
@@ -37,16 +35,3 @@ async def ollama_list_models(base_url: str) -> list[dict]:
             return data.get("models", [])
     except httpx.HTTPError as exc:
         raise RuntimeError(_friendly_http_error(exc)) from exc
-
-
-async def _noop(*_args, **_kwargs) -> None:
-    pass
-
-
-async def ollama_pull(base_url: str, name: str) -> None:
-    try:
-        await download_ollama(name, base_url, _noop, _noop)
-    except httpx.HTTPError as exc:
-        raise RuntimeError(_friendly_http_error(exc)) from exc
-    except Exception as exc:
-        raise RuntimeError(f"拉取失败：{exc}") from exc
