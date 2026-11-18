@@ -1085,7 +1085,18 @@ async def test_cancel_then_retry_releases_dest_once_thread_drains(tmp_path, monk
         DownloadCreate(name="org/m", source="modelscope", target="vllm")
     )
     await _wait_status(tid, "running")
+    # "running" 在进入下载器之前就已落库；必须等下载器真正开始，取消才会走到
+    # 「线程仍在收尾」这条分支，否则慢机器上取消会抢在前面。
+    for _ in range(200):
+        if calls["n"]:
+            break
+        await asyncio.sleep(0.02)
+    assert calls["n"] == 1
     await q.cancel(tid)
+    for _ in range(200):
+        if "drained" in captured:
+            break
+        await asyncio.sleep(0.02)
     row = await _wait_status(tid, "cancelled")
     assert row["status"] == "cancelled"
     key = q._dest_key(row["dest_path"])
