@@ -106,6 +106,13 @@ async def download_ollama(
                     await report()
 
                 if status == "success":
+                    # Ollama stops reporting a layer's offset before it reaches the
+                    # total (it moves on to verifying the digest), so a finished
+                    # pull would otherwise close at "91 %". Success means every
+                    # layer is present in full.
+                    for item in layers.values():
+                        item["completed"] = item["total"]
+                    await report()
                     break
                 if "error" in data:
                     raise RuntimeError(data["error"])
