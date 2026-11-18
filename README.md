@@ -25,7 +25,7 @@
 - 📱 **消息推送** — 钉钉 / 飞书 / 企业微信群机器人，按事件（开始 / 完成 / 失败 / 取消）开关，出站地址白名单校验，Token 脱敏回显
 - 🗃️ **零外部依赖持久化** — 任务与设置存 SQLite（WAL），`docker compose up -d` 即完整部署，无数据库 / 消息队列 / Node 构建链
 
-**技术栈**：FastAPI + uvicorn + httpx（async）· aria2 JSON-RPC · aiosqlite · hugging_face / modelscope SDK 兜底 · 免构建原生 JS SPA（无外部静态资源，CSP 全锁定）
+**技术栈**：FastAPI + uvicorn + httpx（async）· aria2 JSON-RPC · aiosqlite · hugging_face / modelscope SDK 兜底 · 免构建原生 JS SPA（除延迟加载的 Google Fonts 外无外部静态资源，离线时回退系统字体；CSP 仅放行该字体域名）
 
 ## 快速开始
 
@@ -90,6 +90,8 @@ FastAPI 路由层 ── /api/downloads* /api/settings /api/models /api/services
 | `DOWNLOAD_CONCURRENCY` | `2` | 同时下载任务数（运行中可在 API 热调 1–8） |
 | `ARIA2_CONNECTIONS` | `16` | 单文件下载连接数 |
 | `DOWNLOAD_RETRIES` | `3` | 瞬时 TLS / 网络错误额外重试次数（指数退避，0 = 不重试） |
+| `VERIFY_DOWNLOADS` | `1` | 下载后按仓库记录的 SHA-256 校验 LFS 文件，不一致即删除并报错；`0` 关闭（省去一遍读盘） |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | 置于反向代理之后时填代理地址，认证限速才能按真实客户端 IP 计数（否则所有人共用代理这一个桶） |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama 地址（profile 或远程） |
 | `VLLM_BASE_URL` | `http://vllm:8000` | vLLM 地址（profile 或远程） |
 | `VLLM_MODEL` | 空 | `--profile vllm` 使用的**具体已下载仓库路径** |
@@ -135,7 +137,7 @@ FastAPI 路由层 ── /api/downloads* /api/settings /api/models /api/services
 | `GET` / `PUT /api/settings` | 读写设置（Token / Webhook 脱敏回显，明文不回传；PUT 仅改非 `None` 字段） |
 | `POST /api/settings/notify-test` | 推送测试消息 |
 | `GET /api/models` · `DELETE /api/models/{id}` | 模型库扫描（路径 / 占用大小）与删除（**会删除磁盘上的模型目录**，任务记录删除则不动文件） |
-| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama 健康、本地模型列表、拉取（tag 可覆盖） |
+| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama 健康、本地模型列表、拉取（tag 可覆盖；拉取返回 202 和任务 `id`，进度走下载任务接口） |
 | `GET /api/services/vllm/health` · `…/launch-command` | vLLM 健康、启动命令生成 |
 | `POST /api/auth/verify` | 校验 Token |
 | `GET /api/health` | 存活探针（免鉴权，供容器 healthcheck） |

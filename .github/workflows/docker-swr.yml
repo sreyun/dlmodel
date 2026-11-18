@@ -23,7 +23,12 @@ env:
   IMAGE_NAME: dlmodel
 
 jobs:
+  # No image is built from a commit that fails lint or tests.
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   build-push:
+    needs: quality
     runs-on: ubuntu-latest
     # Fail loudly instead of hanging: a stalled SWR round trip once left the job
     # running for three quarters of an hour with no signal, which reads as "the

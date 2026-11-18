@@ -23,7 +23,7 @@
 - 📱 **チャットボット通知** — DingTalk / Feishu（Lark）/ WeCom グループボット。イベント別の ON/OFF、送信先ホストの許可リスト検証、トークンのマスク表示
 - 🗃️ **外部依存ゼロ** — タスクと設定は SQLite（WAL）に永続化。`docker compose up -d` だけで完全デプロイ（DB・メッセージキュー・Node ビルドチェーン不要）
 
-**技術スタック**：FastAPI + uvicorn + httpx（async）· aria2 JSON-RPC · aiosqlite · huggingface_hub / modelscope SDK フォールバック · ビルド不要のネイティブ JS SPA（外部静的アセットなし、CSP 完全ロック）
+**技術スタック**：FastAPI + uvicorn + httpx（async）· aria2 JSON-RPC · aiosqlite · huggingface_hub / modelscope SDK フォールバック · ビルド不要のネイティブ JS SPA（遅延読み込みの Google Fonts 以外に外部静的アセットなし、オフライン時はシステムフォントにフォールバック。CSP はそのフォント配信元のみ許可）
 
 ## クイックスタート
 
@@ -90,6 +90,8 @@ FastAPI ルート ── /api/downloads* /api/settings /api/models /api/services
 | `DOWNLOAD_CONCURRENCY` | `2` | 同時ダウンロードタスク数（API 経由で 1–8 にホット調整可） |
 | `ARIA2_CONNECTIONS` | `16` | 1 ファイルあたりの接続数 |
 | `DOWNLOAD_RETRIES` | `3` | 一時的 TLS/ネットワークエラーの追加リトライ回数（指数バックオフ、0 = 無効） |
+| `VERIFY_DOWNLOADS` | `1` | ダウンロード後に LFS ファイルをリポジトリ記録の SHA-256 で検証し、不一致なら削除してエラーにする。`0` で無効（読み取り 1 回分を省略） |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | リバースプロキシ配下ではプロキシのアドレスを指定。認証レート制限が実クライアント IP 単位になる（未設定だと全員がプロキシの 1 バケットを共有） |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama アドレス（プロファイル or リモート） |
 | `VLLM_BASE_URL` | `http://vllm:8000` | vLLM アドレス（プロファイル or リモート） |
 | `VLLM_MODEL` | 空 | `--profile vllm` が使う**ダウンロード済みの具体リポジトリパス** |
@@ -135,7 +137,7 @@ FastAPI ルート ── /api/downloads* /api/settings /api/models /api/services
 | `GET` / `PUT /api/settings` | 設定の読み書き（トークン / Webhook はマスク表示、平文は返さない；PUT は非 `None` フィールドのみ適用） |
 | `POST /api/settings/notify-test` | テスト通知の送信 |
 | `GET /api/models` · `DELETE /api/models/{id}` | ライブラリスキャン（パス / サイズ）と削除（**ディスク上のモデルディレクトリを削除**；タスク記録削除はファイルを触らない） |
-| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama ヘルス、ローカルモデル一覧、プル（tag 上書き可） |
+| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama ヘルス、ローカルモデル一覧、プル（tag 上書き可。プルは 202 とタスク `id` を返し、進捗はダウンロードタスク API で確認） |
 | `GET /api/services/vllm/health` · `…/launch-command` | vLLM ヘルス、起動コマンド生成 |
 | `POST /api/auth/verify` | トークン検証 |
 | `GET /api/health` | ライブネスプローブ（認証不要、コンテナ healthcheck 用） |
