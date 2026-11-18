@@ -1259,3 +1259,46 @@ async def test_ollama_pull_observes_pause_while_server_is_silent(monkeypatch):
         paused = True
         with pytest.raises(DownloadPaused):
             await asyncio.wait_for(job, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_download_hf_reverifies_existing_file_instead_of_trusting_length(tmp_path):
+    """长度达标不代表内容正确：校验被暂停/重启打断后，恢复时不能直接跳过。"""
+    import hashlib
+
+    import app.downloaders.hf as hf_mod
+
+    content = b"0123456789"
+    target = tmp_path / "model.safetensors"
+    target.write_bytes(b"01234\x00\x00\x00\x009")  # 长度对、内容错
+    logs: list[str] = []
+    hf_mod._verified.clear()
+
+    async def good_http(url, dest, **kwargs):
+        dest.write_bytes(content)
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", side_effect=good_http) as http_mock,
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing(
+                "model.safetensors", content, sha256=hashlib.sha256(content).hexdigest()
+            )
+        )
+        await _run_hf(tmp_path, logs=logs)
+        assert http_mock.call_count == 1
+        assert target.read_bytes() == content
+        assert not any("已存在，跳过" in m for m in logs)
+
+        # 第二次：文件已校验过且未变化，直接跳过，不再重读。
+        logs.clear()
+        with patch.object(hf_mod, "_verify_sha256", new_callable=AsyncMock) as rehash:
+            await _run_hf(tmp_path, logs=logs)
+        rehash.assert_not_awaited()
+        assert http_mock.call_count == 1
+        assert any("已存在，跳过" in m for m in logs)
