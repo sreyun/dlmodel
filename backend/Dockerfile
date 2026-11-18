@@ -14,9 +14,11 @@ WORKDIR /app
 # site-packages layer, which used to force a full pip install plus a cross-border
 # re-upload of every dependency on each tag push (the reason releases hung for tens
 # of minutes when the registry path was slow).
-COPY backend/pyproject.toml /app/pyproject.toml
+# constraints.txt pins the whole tree to the versions the test suite ran against,
+# so a rebuild of the same tag cannot silently pick up a new upstream release.
+COPY backend/pyproject.toml backend/constraints.txt /app/
 COPY backend/app/__init__.py /app/app/__init__.py
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -c constraints.txt .
 
 # Application layer: the real code replaces the stub above (--no-deps keeps this
 # local, so nothing is re-resolved or downloaded here).

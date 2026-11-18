@@ -25,7 +25,7 @@
 - 📱 **Chat-bot notifications** — DingTalk / Feishu (Lark) / WeCom group robots with per-event toggles, outbound host allowlist validation and masked token echo
 - 🗃️ **Zero external dependencies** — tasks and settings persist in SQLite (WAL); `docker compose up -d` is a complete deployment — no database, message queue or Node build chain
 
-**Tech stack**: FastAPI + uvicorn + httpx (async) · aria2 JSON-RPC · aiosqlite · huggingface_hub / modelscope SDK fallback · build-free native JS SPA (no external static assets, fully locked CSP)
+**Tech stack**: FastAPI + uvicorn + httpx (async) · aria2 JSON-RPC · aiosqlite · huggingface_hub / modelscope SDK fallback · build-free native JS SPA (no external static assets except deferred Google Fonts, which fall back to system fonts offline; the CSP allows only that font origin)
 
 ## Quick start
 
@@ -92,6 +92,8 @@ All configuration is provided via `.env` in the repository root (defaults in par
 | `DOWNLOAD_CONCURRENCY` | `2` | Concurrent download tasks (hot-adjustable 1–8 via API) |
 | `ARIA2_CONNECTIONS` | `16` | Connections per file |
 | `DOWNLOAD_RETRIES` | `3` | Extra retries for transient TLS/network errors (exponential backoff; 0 = off) |
+| `VERIFY_DOWNLOADS` | `1` | Verify LFS files against the repo's SHA-256 after download; a mismatch deletes the file and fails the task. `0` disables it (saves one read pass) |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Behind a reverse proxy, set this to the proxy address so the auth rate limit counts real client IPs (otherwise everyone shares the proxy's bucket) |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama endpoint (profile or remote) |
 | `VLLM_BASE_URL` | `http://vllm:8000` | vLLM endpoint (profile or remote) |
 | `VLLM_MODEL` | empty | The **concrete downloaded repo path** used by `--profile vllm` |
@@ -137,7 +139,7 @@ Except `GET /api/health`, all endpoints require `Authorization: Bearer <ADMIN_TO
 | `GET` / `PUT /api/settings` | Read / write settings (tokens & webhooks masked on read; PUT only applies non-`None` fields) |
 | `POST /api/settings/notify-test` | Send a test notification |
 | `GET /api/models` · `DELETE /api/models/{id}` | Library scan (path / size) and delete (**removes the model directory on disk**; deleting task records never touches files) |
-| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama health, local model list, pull (tag override) |
+| `GET /api/services/ollama/health` · `…/models` · `POST …/pull` | Ollama health, local model list, pull (tag override; pull returns 202 with a task `id`, progress via the download task API) |
 | `GET /api/services/vllm/health` · `…/launch-command` | vLLM health, launch-command generation |
 | `POST /api/auth/verify` | Verify the token |
 | `GET /api/health` | Liveness probe (auth-free, used by the container healthcheck) |
