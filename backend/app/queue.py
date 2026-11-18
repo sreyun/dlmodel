@@ -314,6 +314,10 @@ class DownloadQueue:
         except ValueError:
             return str(dest_path)
 
+    def is_dest_busy(self, dest_path: str) -> bool:
+        """True while a worker or a detached ModelScope thread may write there."""
+        return bool(dest_path) and self._dest_key(dest_path) in self._busy_dests
+
     def _release_dest(self, dest_key: str, task_id: str | None) -> None:
         self._busy_dests.discard(dest_key)
         self._detached_dests.discard(dest_key)
