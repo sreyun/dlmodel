@@ -29,6 +29,25 @@ def parse_model_name(name: str) -> tuple[str, str]:
     raise ValueError("模型名称无效")
 
 
+def validate_ollama_ref(name: str) -> None:
+    """Accept what Ollama itself pulls: ``[host[:port]/][namespace/]model[:tag]``.
+
+    Wider than ``parse_model_name`` (``registry.ollama.ai/library/llama3.2`` and
+    ``hf.co/org/repo:Q4_K_M`` have three components). The name never becomes a
+    local path; Ollama stores blobs by digest.
+    """
+    raw = name.strip()
+    if not raw or any(ch.isspace() or not ch.isprintable() for ch in raw):
+        raise ValueError("模型名称无效")
+    if len(raw) > 256:
+        raise ValueError("模型名称过长")
+    parts = raw.split("/")
+    if "\\" in raw or not 1 <= len(parts) <= 3:
+        raise ValueError("模型名称无效")
+    if any(not part or part.startswith(".") for part in parts):
+        raise ValueError("模型名称无效")
+
+
 def hf_model_dir(model_root: str, name: str) -> Path:
     org, repo = parse_model_name(name)
     root = Path(model_root).resolve()

@@ -35,6 +35,7 @@ from app.paths import (
     hf_model_dir,
     ollama_root,
     parse_model_name,
+    validate_ollama_ref,
 )
 from app.routes.settings import effective_settings
 from app.source_resolve import resolve_source
@@ -223,8 +224,11 @@ class DownloadQueue:
 
     async def enqueue(self, payload: DownloadCreate) -> str:
         settings = get_settings()
-        parse_model_name(payload.name)
         _validate_pair(payload.source, payload.target)
+        if payload.target == "ollama":
+            validate_ollama_ref(payload.name)
+        else:
+            parse_model_name(payload.name)
 
         active = await find_active_task(payload.name, payload.target)
         if active is not None:
