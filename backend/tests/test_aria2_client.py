@@ -3,6 +3,7 @@ import json
 import pytest
 import respx
 from httpx import Response
+
 from app.aria2_client import Aria2Client
 
 

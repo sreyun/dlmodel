@@ -10,7 +10,6 @@ from app.db import (
     find_active_task,
     get_task,
     insert_task,
-    list_tasks,
     list_tasks_by_status,
     update_active_task,
     update_task,

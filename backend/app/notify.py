@@ -160,9 +160,13 @@ def format_task_message(task: dict, event: str) -> str:
         lines.append(f"任务：#{task_id[:8]}")
     lines.append(f"进度：{_progress_line(task)}")
     lines.append(f"速率：{_fmt_speed(task.get('speed_bps'))}")
-    lines.append(
-        f"预计剩余：{_fmt_eta(task.get('progress_bytes'), task.get('total_bytes'), task.get('speed_bps'), event=event)}"
+    eta = _fmt_eta(
+        task.get("progress_bytes"),
+        task.get("total_bytes"),
+        task.get("speed_bps"),
+        event=event,
     )
+    lines.append(f"预计剩余：{eta}")
 
     msg = (task.get("message") or "").strip()
     # Drop low-value boilerplate that duplicates structured fields.

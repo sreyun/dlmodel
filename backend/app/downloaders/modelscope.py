@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Awaitable
 
 import requests
-
 from modelscope import snapshot_download
 from modelscope.hub.api import HubApi
 

@@ -1,30 +1,31 @@
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import httpx
 import pytest
 import requests
-from pathlib import Path
-from types import SimpleNamespace
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.downloaders.modelscope as modelscope_mod
-from app.downloaders.ollama import download_ollama
+from app.downloaders.base import DownloadPaused
 from app.downloaders.hf import (
     _download_with_aria2,
     _projected_total,
     _sizes_from_model_info,
     _sizes_from_paths_info,
-    hf_repo_exists,
     download_hf,
+    hf_repo_exists,
 )
 from app.downloaders.modelscope import (
-    ms_repo_exists,
-    ms_repo_file_sizes,
-    download_modelscope,
     # 直引函数对象：autouse fixture 只替换模块属性，这里需要真实实现
     _probe_sizes,
+    download_modelscope,
+    ms_repo_exists,
+    ms_repo_file_sizes,
 )
+from app.downloaders.ollama import download_ollama
 from app.downloaders.progress import dir_size_bytes, format_bytes
-from app.downloaders.base import DownloadPaused
 
 
 @pytest.fixture(autouse=True)
