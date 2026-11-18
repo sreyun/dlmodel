@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.paths import hf_model_dir, parse_model_name, safe_path_under
+from app.paths import hf_model_dir, parse_model_name, safe_path_under, validate_ollama_ref
 
 
 def test_parse_model_name_with_org():
@@ -59,3 +59,27 @@ def test_safe_path_under_allows_nested(tmp_path: Path):
 def test_safe_path_under_rejects_escape(tmp_path: Path, filename: str):
     with pytest.raises(ValueError, match="拒绝路径穿越"):
         safe_path_under(tmp_path, filename)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "llama3.2",
+        "llama3.2:3b",
+        "library/llama3.2:latest",
+        "registry.ollama.ai/library/llama3.2:latest",
+        "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M",
+        "localhost:5000/team/model",
+    ],
+)
+def test_validate_ollama_ref_accepts_ollama_grammar(name: str):
+    validate_ollama_ref(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "  ", "../etc", "a/../b", "/abs", "a//b", "a/b/c/d", "a\\b", "a b", "a\nb", "x" * 257],
+)
+def test_validate_ollama_ref_rejects(name: str):
+    with pytest.raises(ValueError):
+        validate_ollama_ref(name)

@@ -107,6 +107,29 @@ def test_ollama_pull_is_queued_not_held_open(tmp_path, monkeypatch):
         assert _wait_status(client, tid, "cancelled")["status"] == "cancelled"
 
 
+def test_ollama_pull_accepts_fully_qualified_reference(tmp_path, monkeypatch):
+    """带 registry 前缀或 hf.co 的三段式名称是合法的 Ollama 引用。"""
+    with TestClient(_app(tmp_path, monkeypatch)) as client:
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        for name in (
+            "registry.ollama.ai/library/llama3.2:latest",
+            "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M",
+        ):
+            resp = client.post(
+                "/api/services/ollama/pull", headers=HEADERS, json={"name": name}
+            )
+            assert resp.status_code == 202, resp.text
+            client.post(f"/api/downloads/{resp.json()['id']}/cancel", headers=HEADERS)
+
+        # vLLM 目标仍然只接受 org/repo，名称会落成本地目录。
+        vllm = client.post(
+            "/api/downloads",
+            headers=HEADERS,
+            json={"name": "a/b/c", "source": "huggingface", "target": "vllm"},
+        )
+        assert vllm.status_code == 400
+
+
 def test_ollama_pull_rejects_bad_name(tmp_path, monkeypatch):
     with TestClient(_app(tmp_path, monkeypatch)) as client:
         resp = client.post(
