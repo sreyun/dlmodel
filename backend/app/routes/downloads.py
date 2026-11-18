@@ -156,9 +156,10 @@ async def delete_download(
 ) -> dict:
     row = await _get_existing(task_id)
     if row["status"] not in _TERMINAL and row["status"] != "paused":
+        status_zh = _STATUS_ZH.get(row["status"], row["status"])
         raise HTTPException(
             status_code=400,
-            detail=f"无法删除处于「{_STATUS_ZH.get(row['status'], row['status'])}」状态的任务，请先取消",
+            detail=f"无法删除处于「{status_zh}」状态的任务，请先取消",
         )
     deleted = await delete_task(task_id, statuses=tuple(_TERMINAL | {"paused"}))
     if not deleted:

@@ -14,7 +14,8 @@ from app.routes.auth import router as auth_router
 from app.routes.downloads import router as downloads_router
 from app.routes.models import router as models_router
 from app.routes.services import router as services_router
-from app.routes.settings import apply_sqlite_overrides, router as settings_router
+from app.routes.settings import apply_sqlite_overrides
+from app.routes.settings import router as settings_router
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR") or (_REPO_ROOT / "frontend"))

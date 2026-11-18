@@ -386,7 +386,7 @@ async def test_cancel_removed_is_not_failed(tmp_path, monkeypatch):
 async def test_recover_pending_on_start(tmp_path, monkeypatch):
     await init_db(str(tmp_path / "app.db"))
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "models"))
-    from app.db import insert_task, update_task
+    from app.db import insert_task
 
     tid = await insert_task(
         {

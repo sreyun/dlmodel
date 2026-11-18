@@ -1,7 +1,6 @@
 import ssl
 
 import httpx
-import pytest
 
 from app.downloaders.network import is_transient_network_error, retry_backoff_seconds
 

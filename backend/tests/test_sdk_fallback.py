@@ -1,8 +1,9 @@
+from unittest.mock import AsyncMock, patch
+
 import httpx
 import pytest
 import respx
 from httpx import Response
-from unittest.mock import AsyncMock, patch
 
 from app.downloaders.sdk_fallback import http_download
 

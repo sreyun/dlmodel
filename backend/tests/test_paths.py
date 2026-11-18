@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.paths import parse_model_name, hf_model_dir, safe_path_under
+from app.paths import hf_model_dir, parse_model_name, safe_path_under
 
 
 def test_parse_model_name_with_org():
