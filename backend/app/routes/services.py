@@ -1,16 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.auth import require_admin
+from app.models_schema import DownloadCreate
 from app.routes.settings import effective_settings
-from app.services_ollama import ollama_health, ollama_list_models, ollama_pull
+from app.services_ollama import ollama_health, ollama_list_models
 from app.services_vllm import vllm_health, vllm_launch_command
 
 router = APIRouter()
 
 
 class OllamaPullRequest(BaseModel):
-    name: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=256)
 
 
 @router.get("/api/services/ollama/health")
@@ -28,16 +29,22 @@ async def ollama_models_route(_: None = Depends(require_admin)) -> list[dict]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post("/api/services/ollama/pull")
+@router.post("/api/services/ollama/pull", status_code=202)
 async def ollama_pull_route(
-    body: OllamaPullRequest, _: None = Depends(require_admin)
+    body: OllamaPullRequest, request: Request, _: None = Depends(require_admin)
 ) -> dict:
-    settings = await effective_settings()
+    """Queue the pull as a download task instead of holding the request open.
+
+    A multi-GB pull outlives any proxy timeout; as a task it also gets progress,
+    cancel and retry like every other download.
+    """
     try:
-        await ollama_pull(settings["ollama_base_url"], body.name.strip())
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"ok": True}
+        task_id = await request.app.state.queue.enqueue(
+            DownloadCreate(name=body.name.strip(), source="ollama", target="ollama")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "id": task_id}
 
 
 @router.get("/api/services/vllm/health")

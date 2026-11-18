@@ -81,3 +81,35 @@ def test_delete_model_rejected_while_detached_thread_still_writes(tmp_path, monk
         queue._release_dest(key, None)  # 线程结束
         assert client.delete("/api/models/hf/org/detached", headers=HEADERS).status_code == 200
         assert not path.exists()
+
+
+def test_ollama_pull_is_queued_not_held_open(tmp_path, monkeypatch):
+    """拉取走任务队列：请求立刻返回，进度/取消与其他下载一致。"""
+    with TestClient(_app(tmp_path, monkeypatch)) as client:
+        client.app.state.queue._run_download = _inflight_run  # type: ignore[method-assign]
+        started = time.monotonic()
+        resp = client.post(
+            "/api/services/ollama/pull", headers=HEADERS, json={"name": " llama3.2 "}
+        )
+        assert resp.status_code == 202
+        assert time.monotonic() - started < 2
+        tid = resp.json()["id"]
+
+        row = _wait_status(client, tid, "running")
+        assert (row["name"], row["source"], row["target"]) == ("llama3.2", "ollama", "ollama")
+
+        duplicate = client.post(
+            "/api/services/ollama/pull", headers=HEADERS, json={"name": "llama3.2"}
+        )
+        assert duplicate.status_code == 400
+
+        client.post(f"/api/downloads/{tid}/cancel", headers=HEADERS)
+        assert _wait_status(client, tid, "cancelled")["status"] == "cancelled"
+
+
+def test_ollama_pull_rejects_bad_name(tmp_path, monkeypatch):
+    with TestClient(_app(tmp_path, monkeypatch)) as client:
+        resp = client.post(
+            "/api/services/ollama/pull", headers=HEADERS, json={"name": "../etc"}
+        )
+        assert resp.status_code == 400

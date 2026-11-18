@@ -1291,8 +1291,7 @@ function renderServices(gen) {
       const submit = $("ollama-submit");
       if (!nameEl) return;
       const name = nameEl.value.trim();
-      setBusy(submit, true, "拉取中…");
-      showFlash("ollama-msg", "info", `正在拉取 ${name}，大模型可能需要较长时间…`);
+      setBusy(submit, true, "提交中…");
       await guarded(
         async () => {
           await apiJson("/api/services/ollama/pull", {
@@ -1301,8 +1300,7 @@ function renderServices(gen) {
           });
           if (!stillOn("services", gen)) return;
           nameEl.value = "";
-          showFlash("ollama-msg", "ok", `已拉取 ${name}`);
-          await loadOllama();
+          showFlash("ollama-msg", "ok", `已加入下载队列：${name}。进度见「任务」页，完成后点“刷新”。`);
         },
         { gen, page: "services", flashId: "ollama-msg" },
       );
