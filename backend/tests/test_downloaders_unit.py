@@ -1302,3 +1302,31 @@ async def test_download_hf_reverifies_existing_file_instead_of_trusting_length(t
         rehash.assert_not_awaited()
         assert http_mock.call_count == 1
         assert any("已存在，跳过" in m for m in logs)
+
+
+@pytest.mark.asyncio
+async def test_ollama_pull_success_closes_progress_at_total():
+    """Ollama 的层进度常停在总量之前就转去校验；成功后进度必须收在 100%。"""
+    import respx
+
+    body = (
+        b'{"status":"pulling a","digest":"sha256:a","total":1000,"completed":914}\n'
+        b'{"status":"pulling b","digest":"sha256:b","total":500,"completed":500}\n'
+        b'{"status":"verifying sha256 digest"}\n'
+        b'{"status":"success"}\n'
+    )
+    seen: list[tuple[int, int | None]] = []
+
+    async def on_progress(d, t, s):
+        seen.append((d, t))
+
+    async def on_log(m):
+        pass
+
+    with respx.mock:
+        respx.post("http://ollama:11434/api/pull").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        await download_ollama("llama3.2", "http://ollama:11434", on_progress, on_log)
+
+    assert seen[-1] == (1500, 1500)
