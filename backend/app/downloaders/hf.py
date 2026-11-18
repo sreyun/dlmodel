@@ -355,6 +355,28 @@ async def _verify_sha256(path: Path, expected: str, heartbeat: ProgressCallback)
     return job.result() == expected
 
 
+# Files this process already hashed, keyed by path -> (size, mtime_ns, sha256), so
+# resuming a paused multi-shard repo does not re-read every finished shard.
+_verified: dict[str, tuple[int, int, str]] = {}
+_VERIFIED_MAX = 4096
+
+
+async def _verify_cached(path: Path, expected: str, heartbeat: ProgressCallback) -> bool:
+    stat = path.stat()
+    stamp = (stat.st_size, stat.st_mtime_ns, expected)
+    key = str(path)
+    if _verified.get(key) == stamp:
+        return True
+    ok = await _verify_sha256(path, expected, heartbeat)
+    if ok:
+        if len(_verified) >= _VERIFIED_MAX:
+            _verified.clear()
+        _verified[key] = stamp
+    else:
+        _verified.pop(key, None)
+    return ok
+
+
 def _file_progress(
     on_progress: ProgressCallback,
     completed_before: int,
@@ -507,6 +529,10 @@ async def download_hf(
     for index, filename in enumerate(files, start=1):
         file_path = safe_path_under(Path(dest), filename)
         expected = sizes.get(filename)
+        digest = digests.get(filename) if verify else None
+        file_progress = _file_progress(
+            on_progress, completed_before, expected_total, unsized_left
+        )
         if (
             expected is not None
             and file_path.exists()
@@ -516,16 +542,18 @@ async def download_hf(
             # while segments in the middle are still missing.
             and not aria2_control_path(file_path).exists()
         ):
-            await on_log(f"({index}/{len(files)}) 已存在，跳过 {filename}")
-            completed_before += expected
-            await on_progress(completed_before, expected_total or None, 0.0)
-            continue
+            # Full length is not proof of content: a pause or restart can land
+            # between the last byte and the checksum, and files written before
+            # verification existed were never checked at all.
+            if digest is None or await _verify_cached(file_path, digest, file_progress):
+                await on_log(f"({index}/{len(files)}) 已存在，跳过 {filename}")
+                completed_before += expected
+                await on_progress(completed_before, expected_total or None, 0.0)
+                continue
+            await on_log(f"({index}/{len(files)}) {filename} 已存在但校验不一致，重新下载")
+            file_path.unlink(missing_ok=True)
 
         await on_log(f"({index}/{len(files)}) 正在下载 {filename}")
-
-        file_progress = _file_progress(
-            on_progress, completed_before, expected_total, unsized_left
-        )
         await _download_hf_file(
             name,
             filename,
@@ -540,10 +568,9 @@ async def download_hf(
             on_log,
             retries,
         )
-        digest = digests.get(filename) if verify else None
         if digest is not None and file_path.is_file():
             await on_log(f"({index}/{len(files)}) 正在校验 {filename}")
-            if not await _verify_sha256(file_path, digest, file_progress):
+            if not await _verify_cached(file_path, digest, file_progress):
                 file_path.unlink(missing_ok=True)
                 raise RuntimeError(
                     f"{filename} 校验失败（SHA-256 与仓库记录不一致），"
