@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
+import threading
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_url
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
-from app.aria2_client import Aria2Client
+from app.aria2_client import Aria2Client, aria2_control_path
 from app.config import get_settings, optional_secret
 from app.downloaders.base import (
     DownloadControl,
@@ -65,6 +67,36 @@ async def _download_with_aria2(
         headers=headers,
         max_tries=max_tries,
     )
+    try:
+        await _wait_for_aria2(aria2, gid, on_progress)
+    except DownloadControl:
+        raise  # the queue already force-removed this task's gids
+    except Exception:
+        # A failed status call does not stop the transfer, and the caller is about
+        # to hand this same file to the HTTP fallback: make aria2 let go of it.
+        await _stop_aria2(aria2, gid)
+        raise
+
+
+async def _stop_aria2(aria2: Aria2Client, gid: str) -> None:
+    """Best effort: remove ``gid`` and wait briefly until aria2 stopped writing."""
+    try:
+        await aria2.force_remove(gid)
+    except Exception:
+        pass  # already stopped (error / complete) or RPC unreachable
+    for _ in range(10):
+        try:
+            status = await aria2.tell_status(gid)
+        except Exception:
+            return
+        if status["status"] in ("removed", "error", "complete"):
+            return
+        await asyncio.sleep(0.2)
+
+
+async def _wait_for_aria2(
+    aria2: Aria2Client, gid: str, on_progress: ProgressCallback
+) -> None:
     last_total = 0
     while True:
         status = await aria2.tell_status(gid)
@@ -193,6 +225,31 @@ def _entry_size(entry: object) -> int | None:
     return max(candidates) if candidates else None
 
 
+def _entry_sha256(entry: object) -> str | None:
+    """Content hash of an LFS blob, when the listing carries one."""
+    digest = _field(_field(entry, "lfs"), "sha256", "oid")
+    if not isinstance(digest, str):
+        return None
+    digest = digest.removeprefix("sha256:").strip().lower()
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        return None
+    return digest
+
+
+def _digests_from(entries: object) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    try:
+        rows = list(entries or [])
+    except TypeError:
+        return digests
+    for row in rows:
+        path = _field(row, "rfilename", "path")
+        digest = _entry_sha256(row)
+        if isinstance(path, str) and digest is not None:
+            digests[path] = digest
+    return digests
+
+
 def _sizes_from_model_info(info: object) -> dict[str, int]:
     """``model_info(files_metadata=True)`` siblings carry the real LFS size."""
     sizes: dict[str, int] = {}
@@ -222,10 +279,12 @@ def _sizes_from_paths_info(infos: object) -> dict[str, int]:
     return sizes
 
 
-async def _repo_file_sizes(
+async def _repo_file_metadata(
     api: HfApi, name: str, revision: str | None, files: list[str]
-) -> dict[str, int]:
-    """Best-effort ``filename -> bytes`` map; partial results are kept.
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Best-effort ``filename -> bytes`` and ``filename -> sha256`` maps.
+
+    Partial results are kept; only LFS blobs carry a sha256.
 
     Two independent endpoints are queried because mirrors differ in which one
     they answer: ``model_info(files_metadata=True)`` is a single request that
@@ -235,6 +294,7 @@ async def _repo_file_sizes(
     """
     wanted = set(files)
     sizes: dict[str, int] = {}
+    digests: dict[str, str] = {}
     try:
         info = await asyncio.to_thread(
             api.model_info,
@@ -243,6 +303,7 @@ async def _repo_file_sizes(
             files_metadata=True,
         )
         sizes = {p: s for p, s in _sizes_from_model_info(info).items() if p in wanted}
+        digests = _digests_from(getattr(info, "siblings", None))
     except Exception:
         sizes = {}
     if len(sizes) < len(wanted):
@@ -262,7 +323,65 @@ async def _repo_file_sizes(
             for path, size in _sizes_from_paths_info(infos).items():
                 if path in wanted:
                     sizes.setdefault(path, size)
-    return sizes
+            for path, digest in _digests_from(infos).items():
+                digests.setdefault(path, digest)
+    return sizes, {p: d for p, d in digests.items() if p in wanted}
+
+
+def _sha256_file(path: Path, stop: threading.Event) -> str | None:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(4 * 1024 * 1024):
+            if stop.is_set():
+                return None
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _verify_sha256(path: Path, expected: str, heartbeat: ProgressCallback) -> bool:
+    """Hash ``path`` off the event loop; ``heartbeat`` keeps pause/cancel live."""
+    stop = threading.Event()
+    size = path.stat().st_size
+    job = asyncio.ensure_future(asyncio.to_thread(_sha256_file, path, stop))
+    try:
+        while not job.done():
+            await asyncio.wait({job}, timeout=1.0)
+            if not job.done():
+                await heartbeat(size, size, None)
+    finally:
+        stop.set()
+        if not job.done():
+            await asyncio.wait({job})
+    return job.result() == expected
+
+
+def _file_progress(
+    on_progress: ProgressCallback,
+    completed_before: int,
+    expected_total: int,
+    unsized_left: int,
+) -> ProgressCallback:
+    """Map one file's progress onto the repo-wide bar."""
+
+    async def report(done: int, total: int | None, speed: float | None) -> None:
+        overall_done = completed_before + max(int(done or 0), 0)
+        if not expected_total:
+            # Nothing is known about the repo yet (no metadata, no finished file):
+            # one file's size says nothing about the rest, so stay indeterminate
+            # instead of reading "99 %" on shard 1 of 40.
+            await on_progress(overall_done, None, speed)
+            return
+        overall_total = max(expected_total, overall_done)
+        if total:
+            # Metadata under-counts this file (or never sized it): widen the
+            # denominator so the bar never claims more than it has moved.
+            overall_total = max(overall_total, completed_before + int(total))
+        if unsized_left:
+            # Something still unmeasured may follow: a full bar would lie.
+            overall_total = max(overall_total, overall_done + 1)
+        await on_progress(overall_done, overall_total, speed)
+
+    return report
 
 
 # Weight files are the only thing that carries a model's bytes; everything else
@@ -346,10 +465,13 @@ async def download_hf(
     on_progress: ProgressCallback,
     on_log: LogCallback,
     retries: int | None = None,
+    verify: bool | None = None,
 ) -> None:
     token = optional_secret(token)
     if retries is None:
         retries = max(0, int(get_settings().download_retries))
+    if verify is None:
+        verify = bool(get_settings().verify_downloads)
     api = HfApi(endpoint=endpoint, token=token)
     files = await asyncio.to_thread(
         api.list_repo_files, repo_id=name, revision=revision, repo_type="model"
@@ -359,7 +481,7 @@ async def download_hf(
         safe_path_under(Path(dest), filename)
 
     await on_log(f"共 {len(files)} 个文件：{name}")
-    sizes = await _repo_file_sizes(api, name, revision, files)
+    sizes, digests = await _repo_file_metadata(api, name, revision, files)
     # Denominator = every file we expect to land. Repo metadata covers it in the
     # normal case; a file the API could not size is folded in with its real size once
     # fetched, and while unsized files remain their share is projected per class (a
@@ -390,6 +512,9 @@ async def download_hf(
             and file_path.exists()
             and file_path.is_file()
             and file_path.stat().st_size == expected
+            # An aria2 partial is sparse: it can already have its final length
+            # while segments in the middle are still missing.
+            and not aria2_control_path(file_path).exists()
         ):
             await on_log(f"({index}/{len(files)}) 已存在，跳过 {filename}")
             completed_before += expected
@@ -398,24 +523,9 @@ async def download_hf(
 
         await on_log(f"({index}/{len(files)}) 正在下载 {filename}")
 
-        async def file_progress(done: int, total: int | None, speed: float | None) -> None:
-            overall_done = completed_before + max(int(done or 0), 0)
-            if not expected_total:
-                # Nothing is known about the repo yet (no metadata, no finished file):
-                # one file's size says nothing about the rest, so stay indeterminate
-                # instead of reading "99 %" on shard 1 of 40.
-                await on_progress(overall_done, None, speed)
-                return
-            overall_total = max(expected_total, overall_done)
-            if total:
-                # Metadata under-counts this file (or never sized it): widen the
-                # denominator so the bar never claims more than it has moved.
-                overall_total = max(overall_total, completed_before + int(total))
-            if unsized_left:
-                # Something still unmeasured may follow: a full bar would lie.
-                overall_total = max(overall_total, overall_done + 1)
-            await on_progress(overall_done, overall_total, speed)
-
+        file_progress = _file_progress(
+            on_progress, completed_before, expected_total, unsized_left
+        )
         await _download_hf_file(
             name,
             filename,
@@ -430,6 +540,15 @@ async def download_hf(
             on_log,
             retries,
         )
+        digest = digests.get(filename) if verify else None
+        if digest is not None and file_path.is_file():
+            await on_log(f"({index}/{len(files)}) 正在校验 {filename}")
+            if not await _verify_sha256(file_path, digest, file_progress):
+                file_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"{filename} 校验失败（SHA-256 与仓库记录不一致），"
+                    "已删除损坏的文件，请重试"
+                )
         actual = sizes.get(filename)
         if actual is None:
             actual = file_path.stat().st_size if file_path.is_file() else 0

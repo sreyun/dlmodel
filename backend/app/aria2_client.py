@@ -1,10 +1,21 @@
 import uuid
+from pathlib import Path
 
 import httpx
 
 # Fast probe so an unreachable aria2 falls back to HTTP quickly instead of
 # stalling on the client's default (longer) read/connect timeouts.
 _PROBE_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=5.0)
+
+
+def aria2_control_path(file_path: Path) -> Path:
+    """aria2's ``<file>.aria2`` control file; it exists only while unfinished.
+
+    aria2 writes each segment at its final offset (``file-allocation=none`` makes
+    the file sparse), so while this marker is present the file's length says
+    nothing about how much of it has really been downloaded.
+    """
+    return file_path.with_name(file_path.name + ".aria2")
 
 
 class Aria2Client:

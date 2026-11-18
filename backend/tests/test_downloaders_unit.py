@@ -1016,3 +1016,206 @@ def test_format_bytes_and_dir_size_bytes(tmp_path):
     (tmp_path / "sub" / "b.bin").write_bytes(b"z" * 5)
     assert dir_size_bytes(tmp_path) == 15
     assert dir_size_bytes(tmp_path / "missing") == 0
+
+
+def _hf_listing(filename: str, content: bytes, *, sha256: str | None = None):
+    lfs = {"sha256": sha256, "size": len(content)} if sha256 else None
+    return SimpleNamespace(
+        siblings=[SimpleNamespace(rfilename=filename, size=len(content), lfs=lfs)]
+    )
+
+
+async def _run_hf(dest, *, aria2=None, logs=None, on_progress=None):
+    async def _progress(d, t, s):
+        pass
+
+    async def _log(m):
+        if logs is not None:
+            logs.append(m)
+
+    await download_hf(
+        "org/model",
+        dest,
+        endpoint="https://hf.co",
+        token=None,
+        revision="main",
+        aria2=aria2,
+        connections=4,
+        on_progress=on_progress or _progress,
+        on_log=_log,
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_hf_does_not_skip_full_length_aria2_partial(tmp_path):
+    """长度达标但带 .aria2 控制文件的是稀疏半成品，不能当作已完成跳过。"""
+    content = b"0123456789"
+    (tmp_path / "model.safetensors").write_bytes(b"01234\x00\x00\x00\x009")
+    (tmp_path / "model.safetensors.aria2").write_bytes(b"control")
+    logs: list[str] = []
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock) as http_mock,
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing("model.safetensors", content)
+        )
+        await _run_hf(tmp_path, logs=logs)
+
+    http_mock.assert_awaited_once()
+    assert not any("已存在，跳过" in m for m in logs)
+
+
+@pytest.mark.asyncio
+async def test_download_hf_still_skips_complete_file(tmp_path):
+    content = b"0123456789"
+    (tmp_path / "model.safetensors").write_bytes(content)
+    logs: list[str] = []
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", new_callable=AsyncMock) as http_mock,
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing("model.safetensors", content)
+        )
+        await _run_hf(tmp_path, logs=logs)
+
+    http_mock.assert_not_awaited()
+    assert any("已存在，跳过" in m for m in logs)
+
+
+@pytest.mark.asyncio
+async def test_download_hf_rejects_file_whose_sha256_mismatches(tmp_path):
+    import hashlib
+
+    content = b"0123456789"
+    target = tmp_path / "model.safetensors"
+
+    async def corrupt_http(url, dest, **kwargs):
+        dest.write_bytes(b"01234\x00\x00\x00\x009")  # 长度对、内容错
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", side_effect=corrupt_http),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing(
+                "model.safetensors",
+                content,
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        )
+        with pytest.raises(RuntimeError, match="校验失败"):
+            await _run_hf(tmp_path)
+
+    assert not target.exists()  # 损坏文件不留在盘上，重试会重新下载
+
+
+@pytest.mark.asyncio
+async def test_download_hf_accepts_file_whose_sha256_matches(tmp_path):
+    import hashlib
+
+    content = b"0123456789"
+    logs: list[str] = []
+
+    async def good_http(url, dest, **kwargs):
+        dest.write_bytes(content)
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", side_effect=good_http),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing(
+                "model.safetensors",
+                content,
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        )
+        await _run_hf(tmp_path, logs=logs)
+
+    assert (tmp_path / "model.safetensors").read_bytes() == content
+    assert any("正在校验" in m for m in logs)
+    assert logs[-1].startswith("HF 下载完成")
+
+
+@pytest.mark.asyncio
+async def test_download_hf_verification_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("VERIFY_DOWNLOADS", "false")
+
+    async def corrupt_http(url, dest, **kwargs):
+        dest.write_bytes(b"x" * 10)
+
+    with (
+        patch("app.downloaders.hf.HfApi") as MockApi,
+        patch("app.downloaders.hf.hf_hub_url", return_value="https://hf.co/f"),
+        patch("app.downloaders.hf.http_download", side_effect=corrupt_http),
+    ):
+        MockApi.return_value.list_repo_files = MagicMock(
+            return_value=["model.safetensors"]
+        )
+        MockApi.return_value.model_info = MagicMock(
+            return_value=_hf_listing("model.safetensors", b"0123456789", sha256="a" * 64)
+        )
+        await _run_hf(tmp_path)
+
+    assert (tmp_path / "model.safetensors").exists()
+
+
+@pytest.mark.asyncio
+async def test_sha256_verification_stops_on_pause(tmp_path, monkeypatch):
+    """校验大文件期间暂停/取消必须立刻生效，且哈希线程随之退出。"""
+    import app.downloaders.hf as hf_mod
+
+    target = tmp_path / "model.safetensors"
+    target.write_bytes(b"0123456789")
+    released: list[bool] = []
+
+    def slow_hash(path, stop):
+        released.append(stop.wait(timeout=10))
+        return None
+
+    monkeypatch.setattr(hf_mod, "_sha256_file", slow_hash)
+
+    async def heartbeat(d, t, s):
+        raise DownloadPaused()
+
+    with pytest.raises(DownloadPaused):
+        await hf_mod._verify_sha256(target, "a" * 64, heartbeat)
+    assert released == [True]
+
+
+@pytest.mark.asyncio
+async def test_aria2_rpc_failure_removes_gid_before_http_fallback(tmp_path):
+    """状态查询失败不代表 aria2 停了：先让它放手，HTTP 才能接管同一个文件。"""
+    aria2 = MagicMock()
+    aria2.add_uri = AsyncMock(return_value="gid-1")
+    aria2.tell_status = AsyncMock(side_effect=RuntimeError("rpc timeout"))
+    aria2.force_remove = AsyncMock()
+
+    async def on_progress(d, t, s):
+        pass
+
+    with pytest.raises(RuntimeError, match="rpc timeout"):
+        await _download_with_aria2(
+            "https://hf.co/f", tmp_path / "f.bin", aria2, 4, on_progress
+        )
+    aria2.force_remove.assert_awaited_once_with("gid-1")
