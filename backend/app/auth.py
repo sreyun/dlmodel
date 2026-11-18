@@ -1,11 +1,10 @@
-import asyncio
 import hmac
 import os
 import time
 from collections import defaultdict
 from typing import Annotated
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from app.config import get_settings
 
@@ -25,6 +24,7 @@ _WEAK_TOKENS = frozenset(
 _fail_buckets: dict[str, list[float]] = defaultdict(list)
 _FAIL_WINDOW_SEC = 60.0
 _FAIL_LIMIT = 20
+_MAX_BUCKETS = 10_000
 
 
 def assert_admin_token_safe() -> None:
@@ -42,25 +42,38 @@ def assert_admin_token_safe() -> None:
         )
 
 
-def _client_key(authorization: str | None) -> str:
-    # Bucket by presented token prefix to slow sprays without needing real IP middleware.
-    raw = (authorization or "").strip() or "missing"
-    return raw[:48]
+def _client_key(request: Request) -> str:
+    # Bucket by peer address. Anything the caller chooses (such as the token it
+    # presents) would hand every guess a fresh bucket. Behind a reverse proxy,
+    # uvicorn fills this from X-Forwarded-For for proxies in FORWARDED_ALLOW_IPS.
+    return request.client.host if request.client else "unknown"
 
 
 def _rate_limited(key: str) -> bool:
     now = time.monotonic()
-    bucket = _fail_buckets[key]
-    _fail_buckets[key] = [ts for ts in bucket if now - ts < _FAIL_WINDOW_SEC]
-    return len(_fail_buckets[key]) >= _FAIL_LIMIT
+    recent = [ts for ts in _fail_buckets.get(key, ()) if now - ts < _FAIL_WINDOW_SEC]
+    if recent:
+        _fail_buckets[key] = recent
+    else:
+        _fail_buckets.pop(key, None)
+    return len(recent) >= _FAIL_LIMIT
 
 
 def _record_failure(key: str) -> None:
-    _fail_buckets[key].append(time.monotonic())
+    now = time.monotonic()
+    if key not in _fail_buckets and len(_fail_buckets) >= _MAX_BUCKETS:
+        # Bound memory under an address spray: drop buckets that have expired.
+        for stale in [
+            k for k, v in _fail_buckets.items() if now - v[-1] >= _FAIL_WINDOW_SEC
+        ]:
+            del _fail_buckets[stale]
+    _fail_buckets[key].append(now)
 
 
-async def require_admin(authorization: Annotated[str | None, Header()] = None) -> None:
-    key = _client_key(authorization)
+async def require_admin(
+    request: Request, authorization: Annotated[str | None, Header()] = None
+) -> None:
+    key = _client_key(request)
     if _rate_limited(key):
         raise HTTPException(status_code=429, detail="尝试过于频繁，请稍后再试")
     if not authorization or not authorization.startswith("Bearer "):
